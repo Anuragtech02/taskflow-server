@@ -354,16 +354,42 @@ export default async function taskRoutes(fastify: FastifyInstance) {
 
   // ==================== BULK ASSIGNEES & LABELS ====================
 
-  // POST /tasks/bulk-meta — fetch assignees + labels for multiple tasks in one request
+  // POST /tasks/bulk-meta — fetch assignees + labels + subtasks + comments for multiple tasks
+  const bulkMetaSchema = z.object({
+    taskIds: z.array(z.string().uuid()).min(1).max(200),
+    workspaceId: z.string().uuid(),
+  });
+
   fastify.post("/tasks/bulk-meta", async (request, reply) => {
     const authResult = await authenticateRequest(request);
     if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { taskIds } = request.body as { taskIds: string[] };
-    if (!Array.isArray(taskIds) || taskIds.length === 0) {
+
+    const parsed = bulkMetaSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid request body", details: parsed.error.flatten() });
+    }
+    const { taskIds, workspaceId } = parsed.data;
+
+    // Verify workspace membership once
+    const membership = await db.query.workspaceMembers.findFirst({
+      where: and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, authResult.userId)),
+    });
+    if (!membership) return reply.status(403).send({ error: "Forbidden" });
+
+    // Filter to only tasks that belong to this workspace (task → list → space → workspace)
+    const accessibleTasks = await db.query.tasks.findMany({
+      where: inArray(tasks.id, taskIds),
+      columns: { id: true },
+      with: { list: { columns: {}, with: { space: { columns: { workspaceId: true } } } } },
+    });
+    const ids = accessibleTasks
+      .filter(t => t.list.space.workspaceId === workspaceId)
+      .map(t => t.id);
+
+    if (ids.length === 0) {
       return { assignees: {}, labels: {}, subtasks: {}, comments: {} };
     }
-    // Cap to prevent abuse
-    const ids = taskIds.slice(0, 200);
+
     try {
       const [allAssignees, allTaskLabels, subtaskRows, commentCountRows] = await Promise.all([
         db.query.taskAssignees.findMany({
