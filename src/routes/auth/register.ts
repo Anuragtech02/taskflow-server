@@ -26,9 +26,7 @@ function checkRateLimit(ip: string): boolean {
 
 export default async function registerRoutes(fastify: FastifyInstance) {
   fastify.post("/auth/register", async (request, reply) => {
-    const clientIp = (request.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
-      || request.headers["x-real-ip"] as string
-      || request.ip;
+    const clientIp = request.ip;
 
     if (!checkRateLimit(clientIp)) {
       return reply.status(429).send({ error: "Too many requests. Please try again later." });

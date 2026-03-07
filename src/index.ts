@@ -9,6 +9,8 @@ import ssePlugin from "./plugins/sse.js";
 import hocuspocusPlugin from "./plugins/hocuspocus.js";
 import healthRoutes from "./routes/health/index.js";
 import registerRoutes from "./routes/auth/register.js";
+import loginRoutes from "./routes/auth/login.js";
+import oauthRoutes from "./routes/auth/oauth.js";
 import userRoutes from "./routes/users/me.js";
 import workspaceRoutes from "./routes/workspaces/index.js";
 import memberRoutes from "./routes/workspaces/members.js";
@@ -75,6 +77,8 @@ await fastify.register(hocuspocusPlugin);
 // Register routes
 await fastify.register(healthRoutes);
 await fastify.register(registerRoutes);
+await fastify.register(loginRoutes);
+await fastify.register(oauthRoutes);
 await fastify.register(userRoutes);
 await fastify.register(workspaceRoutes);
 await fastify.register(memberRoutes);

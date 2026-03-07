@@ -41,4 +41,13 @@ export const config = {
 
   // Cron
   cronApiKey: process.env.CRON_API_KEY || "",
+
+  // Internal service-to-service auth
+  internalApiSecret: (() => {
+    const secret = process.env.INTERNAL_API_SECRET;
+    if (!secret && process.env.NODE_ENV === "production") {
+      throw new Error("INTERNAL_API_SECRET must be set in production");
+    }
+    return secret || "";
+  })(),
 };
