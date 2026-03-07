@@ -90,10 +90,7 @@ async function verifySessionToken(token: string): Promise<{ id: string } | null>
     if (!userId) return null;
     return { id: userId };
   } catch (err) {
-    // Log for debugging but don't expose details
-    if (process.env.NODE_ENV !== "production") {
-      console.debug("Session token verification failed:", (err as Error).message);
-    }
+    console.log("DEBUG_AUTH jwt_decrypt_failed:", (err as Error).message);
     return null;
   }
 }
