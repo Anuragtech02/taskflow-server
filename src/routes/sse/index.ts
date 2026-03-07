@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { db, schema } from "../../db/index.js";
 import { eq, and } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
+import { config } from "../../config.js";
 
 const { workspaceMembers } = schema;
 
@@ -20,11 +21,30 @@ export default async function sseRoutes(fastify: FastifyInstance) {
       if (!membership) return reply.status(403).send("Forbidden");
     }
 
+    // Derive CORS origin the same way the cors plugin does
+    const origin = request.headers.origin;
+    const allowedOrigin = config.corsOrigin;
+    const mainDomain = config.mainDomain;
+    let corsOrigin = allowedOrigin;
+    if (origin) {
+      if (origin === allowedOrigin || (mainDomain && origin.endsWith(`.${mainDomain}`))) {
+        corsOrigin = origin;
+      }
+      try {
+        const url = new URL(origin);
+        if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
+          corsOrigin = origin;
+        }
+      } catch {}
+    }
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
+      "Access-Control-Allow-Origin": corsOrigin,
+      "Access-Control-Allow-Credentials": "true",
     });
 
     // Send initial connection
