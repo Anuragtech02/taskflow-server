@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, desc, asc, isNull } from "drizzle-orm";
+import { eq, and, desc, asc, isNull, inArray } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { autoCreateDueDateReminder } from "../../lib/reminders.js";
@@ -348,6 +348,47 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       return { success: true };
     } catch (error) {
       console.error("Error deleting comment:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // ==================== BULK ASSIGNEES & LABELS ====================
+
+  // POST /tasks/bulk-meta — fetch assignees + labels for multiple tasks in one request
+  fastify.post("/tasks/bulk-meta", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { taskIds } = request.body as { taskIds: string[] };
+    if (!Array.isArray(taskIds) || taskIds.length === 0) {
+      return { assignees: {}, labels: {} };
+    }
+    // Cap to prevent abuse
+    const ids = taskIds.slice(0, 200);
+    try {
+      const [allAssignees, allTaskLabels] = await Promise.all([
+        db.query.taskAssignees.findMany({
+          where: inArray(taskAssignees.taskId, ids),
+          with: { user: { columns: { id: true, name: true, email: true, avatarUrl: true } } },
+        }),
+        db.query.taskLabels.findMany({
+          where: inArray(taskLabels.taskId, ids),
+          with: { label: true },
+        }),
+      ]);
+
+      // Group by taskId
+      const assigneesByTask: Record<string, typeof allAssignees> = {};
+      for (const a of allAssignees) {
+        (assigneesByTask[a.taskId] ??= []).push(a);
+      }
+      const labelsByTask: Record<string, Array<typeof allTaskLabels[0]["label"]>> = {};
+      for (const tl of allTaskLabels) {
+        (labelsByTask[tl.taskId] ??= []).push(tl.label);
+      }
+
+      return { assignees: assigneesByTask, labels: labelsByTask };
+    } catch (error) {
+      console.error("Error fetching bulk meta:", error);
       return reply.status(500).send({ error: "Internal server error" });
     }
   });
