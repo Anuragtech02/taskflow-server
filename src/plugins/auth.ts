@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { createHash } from "crypto";
 import { jwtDecrypt } from "jose";
+import { hkdf } from "@panva/hkdf";
 import { db, schema } from "../db/index.js";
 import { eq } from "drizzle-orm";
 import { config } from "../config.js";
@@ -42,37 +43,23 @@ async function authenticateApiKey(token: string): Promise<AuthResult | null> {
 
 /**
  * Derive the encryption key from NEXTAUTH_SECRET using HKDF,
- * matching NextAuth v5's JWE token format (A256CBC-HS512).
+ * matching Auth.js v5's JWE token format (A256CBC-HS512).
+ * Auth.js uses the cookie name as salt and includes it in the info string.
  */
-let _encryptionKey: Uint8Array | null = null;
-async function getEncryptionKey(): Promise<Uint8Array> {
+let _encryptionKey: Uint8Array<ArrayBuffer> | null = null;
+async function getEncryptionKey(): Promise<Uint8Array<ArrayBuffer>> {
   if (_encryptionKey) return _encryptionKey;
 
-  const encoder = new TextEncoder();
-  const secret = encoder.encode(config.jwtSecret);
-
-  // NextAuth v5 derives a 64-byte key using HKDF with SHA-256
-  // info = "NextAuth.js Generated Encryption Key" + salt (empty)
-  const keyMaterial = await crypto.subtle.importKey(
-    "raw",
-    secret,
-    { name: "HKDF" },
-    false,
-    ["deriveBits"]
+  const salt = config.sessionCookieName;
+  _encryptionKey = new Uint8Array(
+    await hkdf(
+      "sha256",
+      config.jwtSecret,
+      salt,
+      `Auth.js Generated Encryption Key (${salt})`,
+      64 // 64 bytes for A256CBC-HS512
+    )
   );
-
-  const derivedBits = await crypto.subtle.deriveBits(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: encoder.encode(""),
-      info: encoder.encode("NextAuth.js Generated Encryption Key"),
-    },
-    keyMaterial,
-    512 // 64 bytes for A256CBC-HS512
-  );
-
-  _encryptionKey = new Uint8Array(derivedBits);
   return _encryptionKey;
 }
 
