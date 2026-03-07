@@ -112,6 +112,7 @@ export async function authenticateRequest(
 
   // Fall back to session cookie
   const sessionToken = (request.cookies as Record<string, string | undefined>)?.[config.sessionCookieName];
+  console.log("DEBUG_AUTH cookie_name:", config.sessionCookieName, "found:", !!sessionToken, "all_cookies:", Object.keys(request.cookies || {}));
   if (sessionToken) {
     const decoded = await verifySessionToken(sessionToken);
     if (decoded) {
