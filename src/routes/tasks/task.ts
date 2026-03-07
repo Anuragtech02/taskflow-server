@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, desc, asc, isNull, inArray } from "drizzle-orm";
+import { eq, and, desc, asc, isNull, inArray, sql, count } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { autoCreateDueDateReminder } from "../../lib/reminders.js";
@@ -360,12 +360,12 @@ export default async function taskRoutes(fastify: FastifyInstance) {
     if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
     const { taskIds } = request.body as { taskIds: string[] };
     if (!Array.isArray(taskIds) || taskIds.length === 0) {
-      return { assignees: {}, labels: {} };
+      return { assignees: {}, labels: {}, subtasks: {}, comments: {} };
     }
     // Cap to prevent abuse
     const ids = taskIds.slice(0, 200);
     try {
-      const [allAssignees, allTaskLabels] = await Promise.all([
+      const [allAssignees, allTaskLabels, subtaskRows, commentCountRows] = await Promise.all([
         db.query.taskAssignees.findMany({
           where: inArray(taskAssignees.taskId, ids),
           with: { user: { columns: { id: true, name: true, email: true, avatarUrl: true } } },
@@ -374,6 +374,16 @@ export default async function taskRoutes(fastify: FastifyInstance) {
           where: inArray(taskLabels.taskId, ids),
           with: { label: true },
         }),
+        // Subtasks: fetch child tasks (parentTaskId in ids)
+        db.query.tasks.findMany({
+          where: inArray(tasks.parentTaskId, ids),
+          columns: { id: true, parentTaskId: true, status: true },
+        }),
+        // Comment counts per task
+        db.select({ taskId: taskComments.taskId, count: count() })
+          .from(taskComments)
+          .where(inArray(taskComments.taskId, ids))
+          .groupBy(taskComments.taskId),
       ]);
 
       // Group by taskId
@@ -385,8 +395,18 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       for (const tl of allTaskLabels) {
         (labelsByTask[tl.taskId] ??= []).push(tl.label);
       }
+      const subtasksByTask: Record<string, { id: string; status: string | null }[]> = {};
+      for (const st of subtaskRows) {
+        if (st.parentTaskId) {
+          (subtasksByTask[st.parentTaskId] ??= []).push({ id: st.id, status: st.status });
+        }
+      }
+      const commentsByTask: Record<string, number> = {};
+      for (const cc of commentCountRows) {
+        commentsByTask[cc.taskId] = Number(cc.count);
+      }
 
-      return { assignees: assigneesByTask, labels: labelsByTask };
+      return { assignees: assigneesByTask, labels: labelsByTask, subtasks: subtasksByTask, comments: commentsByTask };
     } catch (error) {
       console.error("Error fetching bulk meta:", error);
       return reply.status(500).send({ error: "Internal server error" });
