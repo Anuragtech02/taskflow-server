@@ -76,8 +76,7 @@ async function verifySessionToken(token: string): Promise<{ id: string } | null>
       || (payload as Record<string, unknown>).sub as string;
     if (!userId) return null;
     return { id: userId };
-  } catch (err) {
-    console.log("DEBUG_AUTH jwt_decrypt_failed:", (err as Error).message);
+  } catch {
     return null;
   }
 }
@@ -96,7 +95,6 @@ export async function authenticateRequest(
 
   // Fall back to session cookie
   const sessionToken = (request.cookies as Record<string, string | undefined>)?.[config.sessionCookieName];
-  console.log("DEBUG_AUTH cookie_name:", config.sessionCookieName, "found:", !!sessionToken, "all_cookies:", Object.keys(request.cookies || {}));
   if (sessionToken) {
     const decoded = await verifySessionToken(sessionToken);
     if (decoded) {
