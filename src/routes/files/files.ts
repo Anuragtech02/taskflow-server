@@ -46,7 +46,7 @@ export default async function fileRoutes(fastify: FastifyInstance) {
       const key = `uploads/${authResult.userId}/${randomUUID()}.${ext}`;
 
       await s3Client.send(new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: buffer, ContentType: data.mimetype }));
-      return { url: `/api/files/${key}`, filename: `${randomUUID()}.${ext}` };
+      return { url: `/files/${key}`, filename: `${randomUUID()}.${ext}` };
     } catch (error) {
       console.error("Upload error:", error);
       return reply.status(500).send({ error: "Failed to upload file" });
