@@ -147,7 +147,7 @@ export default async function listRoutes(fastify: FastifyInstance) {
 
       await db.insert(taskActivities).values({ taskId: task.id, userId: authResult.userId, action: "created" });
       try { await runAutomations("task_created", { taskId: task.id, workspaceId: access.space.workspaceId, userId: authResult.userId }); } catch (err) { console.error("Error running automations:", err); }
-      broadcastToWorkspace(access.space.workspaceId, { type: "task_created", data: { task, listId, userId: authResult.userId } });
+      broadcastToWorkspace(access.space.workspaceId, { type: "task_created", data: { task, listId, spaceId: access.space.id, userId: authResult.userId } });
       return reply.status(201).send({ task });
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });

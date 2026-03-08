@@ -213,7 +213,7 @@ export default async function taskRoutes(fastify: FastifyInstance) {
 
       // Broadcast SSE event
       fastify.sse.broadcastToWorkspace(oldTask.list.space.workspaceId, {
-        type: "task_updated", data: { task: updatedTask, listId: oldTask.listId, userId: authResult.userId },
+        type: "task_updated", data: { task: updatedTask, listId: oldTask.listId, spaceId: oldTask.list.space.id, userId: authResult.userId },
       });
 
       return { task: updatedTask };
@@ -300,6 +300,7 @@ export default async function taskRoutes(fastify: FastifyInstance) {
               title: `New comment on "${access.task.title}"`,
               message: `${commentWithUser?.user?.name || "Someone"} commented on a task you're assigned to`,
               entityType: "task", entityId: taskId, workspaceId: access.task.list.space.workspaceId,
+              spaceId: access.task.list.space.id, listId: access.task.listId,
             });
           }
         }
@@ -311,10 +312,11 @@ export default async function taskRoutes(fastify: FastifyInstance) {
               title: `New comment on "${access.task.title}"`,
               message: `${commentWithUser?.user?.name || "Someone"} commented on your task`,
               entityType: "task", entityId: taskId, workspaceId: access.task.list.space.workspaceId,
+              spaceId: access.task.list.space.id, listId: access.task.listId,
             });
           }
         }
-        await notifyMentions(validatedData.content, authResult.userId, "task", taskId, access.task.title, access.task.list.space.workspaceId);
+        await notifyMentions(validatedData.content, authResult.userId, "task", taskId, access.task.title, access.task.list.space.workspaceId, access.task.list.space.id, access.task.listId);
       } catch (notifError) { console.error("Error sending comment notifications:", notifError); }
 
       return reply.status(201).send({ comment: commentWithUser });
@@ -495,6 +497,7 @@ export default async function taskRoutes(fastify: FastifyInstance) {
         title: `You were assigned to "${access.task.title}"`, message: `You have been assigned to a new task`,
         entityType: "task", entityId: taskId, taskTitle: access.task.title,
         assignedBy: currentUser?.name || "Someone", workspaceId: access.task.list.space.workspaceId,
+        spaceId: access.task.list.space.id, listId: access.task.listId,
       });
 
       const previousAssignees = await db.query.taskAssignees.findMany({ where: eq(taskAssignees.taskId, taskId) });

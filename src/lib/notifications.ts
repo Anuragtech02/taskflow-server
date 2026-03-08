@@ -27,6 +27,8 @@ interface CreateNotificationParams {
   assignedBy?: string;
   dueDate?: Date;
   workspaceId?: string;
+  spaceId?: string;
+  listId?: string;
 }
 
 async function shouldSendEmail(userId: string): Promise<boolean> {
@@ -88,18 +90,34 @@ export async function createNotification(params: CreateNotificationParams) {
   sendEmail();
 
   if (params.workspaceId) {
+    const notificationData = {
+      id: notification.id,
+      title: notification.title,
+      message: notification.message,
+      type: notification.type,
+      userId: notification.userId,
+      entityType: params.entityType || null,
+      entityId: params.entityId || null,
+      spaceId: params.spaceId || null,
+      listId: params.listId || null,
+    };
     broadcastToWorkspace(params.workspaceId, {
       type: "notification",
-      data: {
+      data: notificationData,
+    });
+  } else {
+    try {
+      const notificationData = {
         id: notification.id,
         title: notification.title,
         message: notification.message,
         type: notification.type,
         userId: notification.userId,
-      },
-    });
-  } else {
-    try {
+        entityType: params.entityType || null,
+        entityId: params.entityId || null,
+        spaceId: params.spaceId || null,
+        listId: params.listId || null,
+      };
       const memberships = await db
         .select({ workspaceId: workspaceMembers.workspaceId })
         .from(workspaceMembers)
@@ -107,13 +125,7 @@ export async function createNotification(params: CreateNotificationParams) {
       for (const m of memberships) {
         broadcastToWorkspace(m.workspaceId, {
           type: "notification",
-          data: {
-            id: notification.id,
-            title: notification.title,
-            message: notification.message,
-            type: notification.type,
-            userId: notification.userId,
-          },
+          data: notificationData,
         });
       }
     } catch {
@@ -153,7 +165,9 @@ export async function notifyMentions(
   entityType: string,
   entityId: string,
   taskTitle?: string,
-  workspaceId?: string
+  workspaceId?: string,
+  spaceId?: string,
+  listId?: string,
 ) {
   const usernames = parseMentions(content);
   if (usernames.length === 0) return [];
@@ -179,6 +193,8 @@ export async function notifyMentions(
       taskTitle,
       mentionedBy: mentionedByName,
       workspaceId,
+      spaceId,
+      listId,
     });
     createdNotifications.push(notification);
   }
