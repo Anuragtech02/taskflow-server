@@ -1,11 +1,29 @@
 {
-  "name": "taskflow-mcp-server",
+  "name": "@anuragtech02/taskflow-mcp-server",
   "version": "1.0.0",
-  "private": true,
+  "description": "MCP server for TaskFlow – manage tasks, comments, and assignments from Claude Code",
   "type": "module",
-  "scripts": {
-    "start": "tsx src/index.ts"
+  "bin": {
+    "taskflow-mcp-server": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Anuragtech02/taskflow-server.git",
+    "directory": "mcp-server"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "zod": "^3.24.4"
