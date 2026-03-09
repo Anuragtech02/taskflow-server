@@ -1,6 +1,6 @@
 {
-  "name": "@anuragtech02/taskflow-mcp-server",
-  "version": "1.0.0",
+  "name": "taskflow-mcp-server",
+  "version": "1.0.1",
   "description": "MCP server for TaskFlow – manage tasks, comments, and assignments from Claude Code",
   "type": "module",
   "bin": {
@@ -21,7 +21,7 @@
     "directory": "mcp-server"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org"
   },
   "license": "MIT",
   "dependencies": {
