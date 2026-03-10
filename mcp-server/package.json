@@ -1,6 +1,6 @@
 {
   "name": "taskflow-mcp-server",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MCP server for TaskFlow – manage tasks, comments, and assignments from Claude Code",
   "type": "module",
   "bin": {

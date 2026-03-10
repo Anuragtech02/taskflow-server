@@ -40,29 +40,29 @@ export class TaskFlowClient {
   }
 
   async listWorkspaces() {
-    return this.request("/api/workspaces");
+    return this.request("/workspaces");
   }
 
   async listLists(workspaceId: string) {
-    return this.request(`/api/workspaces/${workspaceId}/lists`);
+    return this.request(`/workspaces/${workspaceId}/lists`);
   }
 
   async listMembers(workspaceId: string) {
-    return this.request(`/api/workspaces/${workspaceId}/members`);
+    return this.request(`/workspaces/${workspaceId}/members`);
   }
 
   async searchTasks(workspaceId: string, query: string) {
     return this.request(
-      `/api/workspaces/${workspaceId}/search?q=${encodeURIComponent(query)}`
+      `/workspaces/${workspaceId}/search?q=${encodeURIComponent(query)}`
     );
   }
 
   async getTasks(listId: string) {
-    return this.request(`/api/lists/${listId}/tasks`);
+    return this.request(`/lists/${listId}/tasks`);
   }
 
   async getTask(taskId: string) {
-    return this.request(`/api/tasks/${taskId}`);
+    return this.request(`/tasks/${taskId}`);
   }
 
   async createTask(
@@ -92,7 +92,7 @@ export class TaskFlowClient {
     if (data.priority !== undefined) body.priority = data.priority;
     if (data.dueDate !== undefined) body.dueDate = data.dueDate;
 
-    return this.request(`/api/lists/${listId}/tasks`, {
+    return this.request(`/lists/${listId}/tasks`, {
       method: "POST",
       body: JSON.stringify(body),
     });
@@ -128,28 +128,28 @@ export class TaskFlowClient {
     if (data.dueDate !== undefined) body.dueDate = data.dueDate;
     if (data.listId !== undefined) body.listId = data.listId;
 
-    return this.request(`/api/tasks/${taskId}`, {
+    return this.request(`/tasks/${taskId}`, {
       method: "PATCH",
       body: JSON.stringify(body),
     });
   }
 
   async addComment(taskId: string, content: string) {
-    return this.request(`/api/tasks/${taskId}/comments`, {
+    return this.request(`/tasks/${taskId}/comments`, {
       method: "POST",
       body: JSON.stringify({ content }),
     });
   }
 
   async assignTask(taskId: string, userId: string) {
-    return this.request(`/api/tasks/${taskId}/assignees`, {
+    return this.request(`/tasks/${taskId}/assignees`, {
       method: "POST",
       body: JSON.stringify({ userId }),
     });
   }
 
   async unassignTask(taskId: string, userId: string) {
-    return this.request(`/api/tasks/${taskId}/assignees?userId=${userId}`, {
+    return this.request(`/tasks/${taskId}/assignees?userId=${userId}`, {
       method: "DELETE",
     });
   }
