@@ -4,14 +4,14 @@ import { ServerResponse } from "http";
 
 type SSEConnection = ServerResponse;
 
-// Store active connections per workspace
-const workspaceConnections = new Map<string, Set<SSEConnection>>();
+// Store active connections per workspace: Map<workspaceId, Map<connection, userId>>
+const workspaceConnections = new Map<string, Map<SSEConnection, string>>();
 
-export function addConnection(workspaceId: string, connection: SSEConnection) {
+export function addConnection(workspaceId: string, connection: SSEConnection, userId: string) {
   if (!workspaceConnections.has(workspaceId)) {
-    workspaceConnections.set(workspaceId, new Set());
+    workspaceConnections.set(workspaceId, new Map());
   }
-  workspaceConnections.get(workspaceId)!.add(connection);
+  workspaceConnections.get(workspaceId)!.set(connection, userId);
 }
 
 export function removeConnection(workspaceId: string, connection: SSEConnection) {
@@ -28,13 +28,20 @@ export function getConnectionCount(workspaceId: string): number {
   return workspaceConnections.get(workspaceId)?.size ?? 0;
 }
 
+export function getActiveUsers(workspaceId: string): string[] {
+  const connections = workspaceConnections.get(workspaceId);
+  if (!connections) return [];
+  return Array.from(new Set(connections.values()));
+}
+
 export type SSEEventType =
   | "task_created"
   | "task_updated"
   | "task_deleted"
   | "comment_added"
   | "sprint_updated"
-  | "notification";
+  | "notification"
+  | "presence_update";
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -47,7 +54,7 @@ export function broadcastToWorkspace(workspaceId: string, event: SSEEvent) {
 
   const message = `event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`;
 
-  for (const connection of connections) {
+  for (const [connection] of connections) {
     try {
       connection.write(message);
     } catch {
@@ -65,6 +72,7 @@ async function ssePlugin(fastify: FastifyInstance) {
     addConnection,
     removeConnection,
     getConnectionCount,
+    getActiveUsers,
     broadcastToWorkspace,
   });
 }
@@ -75,6 +83,7 @@ declare module "fastify" {
       addConnection: typeof addConnection;
       removeConnection: typeof removeConnection;
       getConnectionCount: typeof getConnectionCount;
+      getActiveUsers: typeof getActiveUsers;
       broadcastToWorkspace: typeof broadcastToWorkspace;
     };
   }

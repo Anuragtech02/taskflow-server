@@ -1,10 +1,20 @@
 import { FastifyInstance } from "fastify";
 import { db, schema } from "../../db/index.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { config } from "../../config.js";
 
-const { workspaceMembers } = schema;
+const { workspaceMembers, users } = schema;
+
+async function getActiveUserDetails(fastify: FastifyInstance, workspaceId: string) {
+  const userIds = fastify.sse.getActiveUsers(workspaceId);
+  if (userIds.length === 0) return [];
+  const activeUsers = await db
+    .select({ id: users.id, name: users.name, avatarUrl: users.avatarUrl })
+    .from(users)
+    .where(inArray(users.id, userIds));
+  return activeUsers;
+}
 
 export default async function sseRoutes(fastify: FastifyInstance) {
   // GET /sse
@@ -38,6 +48,9 @@ export default async function sseRoutes(fastify: FastifyInstance) {
       } catch {}
     }
 
+    // Tell Fastify to stop managing the response — we're taking over reply.raw
+    reply.hijack();
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
@@ -48,11 +61,19 @@ export default async function sseRoutes(fastify: FastifyInstance) {
     });
 
     // Send initial connection
-    reply.raw.write(`event: connected\ndata: {"userId":"${authResult.userId}","workspaceId":"${workspaceId || ""}"}\n\n`);
+    const connectedPayload = JSON.stringify({ userId: authResult.userId, workspaceId: workspaceId || "" });
+    reply.raw.write(`event: connected\ndata: ${connectedPayload}\n\n`);
 
     // Register with SSE plugin
     if (workspaceId) {
-      fastify.sse.addConnection(workspaceId, reply.raw);
+      fastify.sse.addConnection(workspaceId, reply.raw, authResult.userId);
+
+      // Broadcast presence update to all connections in the workspace
+      const activeUsers = await getActiveUserDetails(fastify, workspaceId);
+      fastify.sse.broadcastToWorkspace(workspaceId, {
+        type: "presence_update",
+        data: { activeUsers },
+      });
     }
 
     // Keepalive
@@ -65,8 +86,33 @@ export default async function sseRoutes(fastify: FastifyInstance) {
       clearInterval(interval);
       if (workspaceId) {
         fastify.sse.removeConnection(workspaceId, reply.raw);
+
+        // Broadcast updated presence after disconnect
+        getActiveUserDetails(fastify, workspaceId).then((activeUsers) => {
+          fastify.sse.broadcastToWorkspace(workspaceId, {
+            type: "presence_update",
+            data: { activeUsers },
+          });
+        }).catch(() => {});
       }
       try { reply.raw.end(); } catch {}
     });
+  });
+
+  // GET /sse/presence
+  fastify.get("/sse/presence", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send("Unauthorized");
+
+    const { workspaceId } = request.query as { workspaceId?: string };
+    if (!workspaceId) return reply.status(400).send("workspaceId query param required");
+
+    const membership = await db.query.workspaceMembers.findFirst({
+      where: and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, authResult.userId)),
+    });
+    if (!membership) return reply.status(403).send("Forbidden");
+
+    const activeUsers = await getActiveUserDetails(fastify, workspaceId);
+    return reply.send({ activeUsers });
   });
 }
