@@ -99,6 +99,10 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
           .map(st => st.taskId);
         if (doneTaskIds.length > 0) {
           await db.update(tasks).set({ archivedAt: new Date() }).where(and(inArray(tasks.id, doneTaskIds), isNull(tasks.archivedAt)));
+          fastify.sse.broadcastToWorkspace(access.membership.workspaceId, {
+            type: "task_updated",
+            data: { taskIds: doneTaskIds, userId: authResult.userId, sprintCompleted: true },
+          });
         }
       }
 
