@@ -257,6 +257,8 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       if (!access) return reply.status(404).send({ error: "Task not found or access denied" });
       const [updated] = await db.update(tasks).set({ archivedAt: new Date() }).where(eq(tasks.id, taskId)).returning();
       await db.insert(taskActivities).values({ taskId, userId: authResult.userId, action: "archived", field: "archivedAt", newValue: "archived" });
+      const workspaceId = access.task.list.space.workspaceId;
+      fastify.sse.broadcastToWorkspace(workspaceId, { type: "task_updated", data: { taskId, listId: access.task.listId, userId: authResult.userId } });
       return { task: updated };
     } catch (error) {
       console.error("Error archiving task:", error);
@@ -275,6 +277,8 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       if (!access) return reply.status(404).send({ error: "Task not found or access denied" });
       const [updated] = await db.update(tasks).set({ archivedAt: null }).where(eq(tasks.id, taskId)).returning();
       await db.insert(taskActivities).values({ taskId, userId: authResult.userId, action: "unarchived", field: "archivedAt", newValue: "active" });
+      const workspaceId = access.task.list.space.workspaceId;
+      fastify.sse.broadcastToWorkspace(workspaceId, { type: "task_updated", data: { taskId, listId: access.task.listId, userId: authResult.userId } });
       return { task: updated };
     } catch (error) {
       console.error("Error unarchiving task:", error);
@@ -290,8 +294,33 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       const { taskIds } = request.body as { taskIds: string[] };
       if (!Array.isArray(taskIds) || taskIds.length === 0) return reply.status(400).send({ error: "taskIds array required" });
       if (taskIds.some(id => !UUID_REGEX.test(id))) return reply.status(400).send({ error: "Invalid task ID format" });
-      await db.update(tasks).set({ archivedAt: new Date() }).where(and(inArray(tasks.id, taskIds), isNull(tasks.archivedAt)));
-      return { success: true, archivedCount: taskIds.length };
+
+      // Verify access: only archive tasks the user can access
+      const accessibleTasks = await db.query.tasks.findMany({
+        where: inArray(tasks.id, taskIds),
+        with: { list: { with: { space: true } } },
+      });
+      const workspaceIds = new Set<string>();
+      const accessibleIds: string[] = [];
+      for (const task of accessibleTasks) {
+        const membership = await db.query.workspaceMembers.findFirst({
+          where: and(eq(workspaceMembers.workspaceId, task.list.space.workspaceId), eq(workspaceMembers.userId, authResult.userId)),
+        });
+        if (membership) {
+          accessibleIds.push(task.id);
+          workspaceIds.add(task.list.space.workspaceId);
+        }
+      }
+      if (accessibleIds.length === 0) return reply.status(403).send({ error: "No accessible tasks" });
+
+      await db.update(tasks).set({ archivedAt: new Date() }).where(and(inArray(tasks.id, accessibleIds), isNull(tasks.archivedAt)));
+
+      // Broadcast to affected workspaces
+      for (const wsId of workspaceIds) {
+        fastify.sse.broadcastToWorkspace(wsId, { type: "task_updated", data: { taskIds: accessibleIds, userId: authResult.userId } });
+      }
+
+      return { success: true, archivedCount: accessibleIds.length };
     } catch (error) {
       console.error("Error bulk archiving tasks:", error);
       return reply.status(500).send({ error: "Internal server error" });
