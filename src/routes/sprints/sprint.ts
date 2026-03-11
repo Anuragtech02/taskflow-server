@@ -1,10 +1,10 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, asc, gte, lte, inArray, isNull } from "drizzle-orm";
+import { eq, and, asc, desc, gte, lte, inArray, isNull } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 
-const { sprints, workspaceMembers, sprintTasks, tasks, taskActivities } = schema;
+const { sprints, workspaceMembers, sprintTasks, tasks, taskActivities, sprintRetroItems, users, lists } = schema;
 
 const updateSprintSchema = z.object({
   name: z.string().min(1).max(255).optional(),
@@ -295,6 +295,195 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
     } catch (error) {
       console.error("Error removing task from sprint:", error);
       return reply.status(500).send({ error: "Failed to remove task from sprint" });
+    }
+  });
+
+  // ==================== RETROSPECTIVE ====================
+
+  const createRetroItemSchema = z.object({
+    category: z.enum(["went_well", "to_improve", "action_item"]),
+    content: z.string().min(1).max(2000),
+  });
+
+  // GET /sprints/:id/retro
+  fastify.get("/sprints/:id/retro", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: sprintId } = request.params as { id: string };
+    try {
+      const access = await checkSprintAccess(sprintId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Sprint not found" });
+
+      const items = await db.query.sprintRetroItems.findMany({
+        where: eq(sprintRetroItems.sprintId, sprintId),
+        with: { user: { columns: { id: true, name: true, avatarUrl: true } } },
+        orderBy: [asc(sprintRetroItems.createdAt)],
+      });
+
+      // Sprint summary stats
+      const sprintTaskRelations = await db.query.sprintTasks.findMany({
+        where: eq(sprintTasks.sprintId, sprintId),
+        with: {
+          task: {
+            with: {
+              assignees: { with: { user: { columns: { id: true, name: true, avatarUrl: true } } } },
+            },
+          },
+        },
+      });
+
+      const allTasks = sprintTaskRelations.map(st => st.task);
+      const completed = allTasks.filter(t => t.status === "done" || t.status === "closed" || t.status === "complete");
+      const carriedOver = allTasks.filter(t => t.status !== "done" && t.status !== "closed" && t.status !== "complete");
+
+      // Tasks per assignee
+      const byAssignee: Record<string, { user: { id: string; name: string | null; avatarUrl: string | null }; completed: number; total: number }> = {};
+      for (const task of allTasks) {
+        for (const a of task.assignees) {
+          if (!byAssignee[a.user.id]) {
+            byAssignee[a.user.id] = { user: a.user, completed: 0, total: 0 };
+          }
+          byAssignee[a.user.id].total++;
+          if (completed.some(c => c.id === task.id)) {
+            byAssignee[a.user.id].completed++;
+          }
+        }
+      }
+
+      return {
+        items,
+        summary: {
+          totalTasks: allTasks.length,
+          completedTasks: completed.length,
+          carriedOverTasks: carriedOver.length,
+          completionRate: allTasks.length > 0 ? Math.round((completed.length / allTasks.length) * 100) : 0,
+          byAssignee: Object.values(byAssignee),
+        },
+      };
+    } catch (error) {
+      console.error("Error fetching retro:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // POST /sprints/:id/retro
+  fastify.post("/sprints/:id/retro", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: sprintId } = request.params as { id: string };
+    try {
+      const access = await checkSprintAccess(sprintId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Sprint not found" });
+
+      const body = request.body as Record<string, unknown>;
+      const validatedData = createRetroItemSchema.parse(body);
+
+      const [item] = await db.insert(sprintRetroItems).values({
+        sprintId,
+        userId: authResult.userId,
+        category: validatedData.category,
+        content: validatedData.content,
+      }).returning();
+
+      const itemWithUser = await db.query.sprintRetroItems.findFirst({
+        where: eq(sprintRetroItems.id, item.id),
+        with: { user: { columns: { id: true, name: true, avatarUrl: true } } },
+      });
+
+      return reply.status(201).send({ item: itemWithUser });
+    } catch (error) {
+      if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
+      console.error("Error creating retro item:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // DELETE /sprints/:id/retro/:itemId
+  fastify.delete("/sprints/:id/retro/:itemId", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: sprintId, itemId } = request.params as { id: string; itemId: string };
+    try {
+      const access = await checkSprintAccess(sprintId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Sprint not found" });
+
+      const item = await db.query.sprintRetroItems.findFirst({
+        where: and(eq(sprintRetroItems.id, itemId), eq(sprintRetroItems.sprintId, sprintId)),
+      });
+      if (!item) return reply.status(404).send({ error: "Retro item not found" });
+      // Only the author or workspace admin/owner can delete
+      if (item.userId !== authResult.userId && !["owner", "admin"].includes(access.membership.role)) {
+        return reply.status(403).send({ error: "Not authorized to delete this item" });
+      }
+
+      await db.delete(sprintRetroItems).where(eq(sprintRetroItems.id, itemId));
+      return { success: true };
+    } catch (error) {
+      console.error("Error deleting retro item:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // POST /sprints/:id/retro/:itemId/convert-to-task
+  fastify.post("/sprints/:id/retro/:itemId/convert-to-task", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: sprintId, itemId } = request.params as { id: string; itemId: string };
+    try {
+      const access = await checkSprintAccess(sprintId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Sprint not found" });
+
+      const item = await db.query.sprintRetroItems.findFirst({
+        where: and(eq(sprintRetroItems.id, itemId), eq(sprintRetroItems.sprintId, sprintId)),
+      });
+      if (!item) return reply.status(404).send({ error: "Retro item not found" });
+      if (item.convertedTaskId) return reply.status(400).send({ error: "Already converted to a task" });
+
+      // Get the listId from the request body, or find the first list in the workspace
+      const body = request.body as { listId?: string };
+      let listId = body.listId;
+      if (!listId) {
+        const firstList = await db.query.lists.findFirst({
+          with: { space: true },
+          where: eq(lists.id, lists.id), // just get any list
+        });
+        // Find a list in this workspace
+        const workspaceLists = await db.select({ id: lists.id }).from(lists)
+          .innerJoin(schema.spaces, eq(lists.spaceId, schema.spaces.id))
+          .where(eq(schema.spaces.workspaceId, access.membership.workspaceId))
+          .limit(1);
+        if (workspaceLists.length === 0) return reply.status(400).send({ error: "No lists found in workspace. Provide a listId." });
+        listId = workspaceLists[0].id;
+      }
+
+      // Create the task
+      const [task] = await db.insert(tasks).values({
+        listId,
+        title: item.content.substring(0, 500),
+        status: "todo",
+        priority: "medium",
+        creatorId: authResult.userId,
+      }).returning();
+
+      // Link the retro item to the task
+      await db.update(sprintRetroItems).set({ convertedTaskId: task.id }).where(eq(sprintRetroItems.id, itemId));
+
+      // If there's a next planned/active sprint, add the task to it
+      const nextSprint = await db.query.sprints.findFirst({
+        where: and(
+          eq(sprints.workspaceId, access.membership.workspaceId),
+          inArray(sprints.status, ["planned", "active"]),
+        ),
+        orderBy: [asc(sprints.startDate)],
+      });
+      if (nextSprint) {
+        await db.insert(sprintTasks).values({ sprintId: nextSprint.id, taskId: task.id }).onConflictDoNothing();
+      }
+
+      return reply.status(201).send({ task, addedToSprintId: nextSprint?.id || null });
+    } catch (error) {
+      console.error("Error converting retro item to task:", error);
+      return reply.status(500).send({ error: "Internal server error" });
     }
   });
 }

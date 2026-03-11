@@ -326,6 +326,28 @@ export const sprintTasks = pgTable(
   (t) => [primaryKey({ columns: [t.sprintId, t.taskId] })]
 );
 
+// ─── Sprint Retro Items ─────────────────────────────────────────────────────
+export const sprintRetroItems = pgTable(
+  "sprint_retro_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sprintId: uuid("sprint_id")
+      .notNull()
+      .references(() => sprints.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    category: varchar("category", { length: 20 }).notNull(), // went_well, to_improve, action_item
+    content: text("content").notNull(),
+    convertedTaskId: uuid("converted_task_id").references(() => tasks.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    index("sprint_retro_items_sprint_idx").on(t.sprintId),
+    index("sprint_retro_items_user_idx").on(t.userId),
+  ]
+);
+
 // ─── Views ────────────────────────────────────────────────────────────────────
 export const views = pgTable(
   "views",
@@ -614,6 +636,7 @@ export const sprintsRelations = relations(sprints, ({ one, many }) => ({
     references: [workspaces.id],
   }),
   sprintTasks: many(sprintTasks),
+  retroItems: many(sprintRetroItems),
 }));
 
 export const sprintTasksRelations = relations(sprintTasks, ({ one }) => ({
@@ -623,6 +646,21 @@ export const sprintTasksRelations = relations(sprintTasks, ({ one }) => ({
   }),
   task: one(tasks, {
     fields: [sprintTasks.taskId],
+    references: [tasks.id],
+  }),
+}));
+
+export const sprintRetroItemsRelations = relations(sprintRetroItems, ({ one }) => ({
+  sprint: one(sprints, {
+    fields: [sprintRetroItems.sprintId],
+    references: [sprints.id],
+  }),
+  user: one(users, {
+    fields: [sprintRetroItems.userId],
+    references: [users.id],
+  }),
+  convertedTask: one(tasks, {
+    fields: [sprintRetroItems.convertedTaskId],
     references: [tasks.id],
   }),
 }));
