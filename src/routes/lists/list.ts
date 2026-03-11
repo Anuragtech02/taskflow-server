@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, asc } from "drizzle-orm";
+import { eq, and, asc, isNull } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { broadcastToWorkspace } from "../../plugins/sse.js";
@@ -107,14 +107,17 @@ export default async function listRoutes(fastify: FastifyInstance) {
     const authResult = await authenticateRequest(request);
     if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
     const { id: listId } = request.params as { id: string };
-    const { limit: l, offset: o } = request.query as { limit?: string; offset?: string };
+    const { limit: l, offset: o, includeArchived } = request.query as { limit?: string; offset?: string; includeArchived?: string };
     const limit = Math.min(Math.max(parseInt(l || "200", 10) || 200, 1), 500);
     const offset = Math.max(parseInt(o || "0", 10) || 0, 0);
     try {
       const access = await checkListAccess(listId, authResult.userId);
       if (!access) return reply.status(404).send({ error: "List not found" });
       const listTasks = await db.query.tasks.findMany({
-        where: eq(tasks.listId, listId), orderBy: [asc(tasks.order)],
+        where: includeArchived === "true"
+          ? eq(tasks.listId, listId)
+          : and(eq(tasks.listId, listId), isNull(tasks.archivedAt)),
+        orderBy: [asc(tasks.order)],
         limit, offset,
         with: {
           assignees: { with: { user: { columns: { id: true, name: true, email: true, avatarUrl: true } } } },

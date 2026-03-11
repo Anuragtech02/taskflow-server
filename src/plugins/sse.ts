@@ -67,6 +67,26 @@ export function broadcastToWorkspace(workspaceId: string, event: SSEEvent) {
   }
 }
 
+export function sendToUser(workspaceId: string, userId: string, event: SSEEvent) {
+  const connections = workspaceConnections.get(workspaceId);
+  if (!connections || connections.size === 0) return;
+
+  const message = `event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`;
+
+  for (const [connection, connUserId] of connections) {
+    if (connUserId !== userId) continue;
+    try {
+      connection.write(message);
+    } catch {
+      connections.delete(connection);
+    }
+  }
+
+  if (connections.size === 0) {
+    workspaceConnections.delete(workspaceId);
+  }
+}
+
 async function ssePlugin(fastify: FastifyInstance) {
   fastify.decorate("sse", {
     addConnection,
@@ -74,6 +94,7 @@ async function ssePlugin(fastify: FastifyInstance) {
     getConnectionCount,
     getActiveUsers,
     broadcastToWorkspace,
+    sendToUser,
   });
 }
 
@@ -85,6 +106,7 @@ declare module "fastify" {
       getConnectionCount: typeof getConnectionCount;
       getActiveUsers: typeof getActiveUsers;
       broadcastToWorkspace: typeof broadcastToWorkspace;
+      sendToUser: typeof sendToUser;
     };
   }
 }

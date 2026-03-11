@@ -244,6 +244,60 @@ export default async function taskRoutes(fastify: FastifyInstance) {
     }
   });
 
+  // ==================== ARCHIVE ====================
+
+  // POST /tasks/:id/archive
+  fastify.post("/tasks/:id/archive", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: taskId } = request.params as { id: string };
+    if (!UUID_REGEX.test(taskId)) return reply.status(400).send({ error: "Invalid task ID format" });
+    try {
+      const access = await checkTaskAccess(taskId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Task not found or access denied" });
+      const [updated] = await db.update(tasks).set({ archivedAt: new Date() }).where(eq(tasks.id, taskId)).returning();
+      await db.insert(taskActivities).values({ taskId, userId: authResult.userId, action: "archived", field: "archivedAt", newValue: "archived" });
+      return { task: updated };
+    } catch (error) {
+      console.error("Error archiving task:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // POST /tasks/:id/unarchive
+  fastify.post("/tasks/:id/unarchive", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: taskId } = request.params as { id: string };
+    if (!UUID_REGEX.test(taskId)) return reply.status(400).send({ error: "Invalid task ID format" });
+    try {
+      const access = await checkTaskAccess(taskId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Task not found or access denied" });
+      const [updated] = await db.update(tasks).set({ archivedAt: null }).where(eq(tasks.id, taskId)).returning();
+      await db.insert(taskActivities).values({ taskId, userId: authResult.userId, action: "unarchived", field: "archivedAt", newValue: "active" });
+      return { task: updated };
+    } catch (error) {
+      console.error("Error unarchiving task:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // POST /tasks/bulk-archive
+  fastify.post("/tasks/bulk-archive", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    try {
+      const { taskIds } = request.body as { taskIds: string[] };
+      if (!Array.isArray(taskIds) || taskIds.length === 0) return reply.status(400).send({ error: "taskIds array required" });
+      if (taskIds.some(id => !UUID_REGEX.test(id))) return reply.status(400).send({ error: "Invalid task ID format" });
+      await db.update(tasks).set({ archivedAt: new Date() }).where(and(inArray(tasks.id, taskIds), isNull(tasks.archivedAt)));
+      return { success: true, archivedCount: taskIds.length };
+    } catch (error) {
+      console.error("Error bulk archiving tasks:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
   // ==================== COMMENTS ====================
 
   // GET /tasks/:id/comments

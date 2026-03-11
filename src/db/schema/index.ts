@@ -142,6 +142,7 @@ export const tasks = pgTable(
     blocks: jsonb("blocks").default([]),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    archivedAt: timestamp("archived_at"),
   },
   (t) => [
     index("tasks_list_idx").on(t.listId),
@@ -151,6 +152,7 @@ export const tasks = pgTable(
     index("tasks_parent_idx").on(t.parentTaskId),
     index("tasks_due_date_idx").on(t.dueDate),
     index("tasks_start_date_idx").on(t.startDate),
+    index("tasks_archived_at_idx").on(t.archivedAt),
   ]
 );
 

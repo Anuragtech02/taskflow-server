@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, asc, gte, lte, inArray } from "drizzle-orm";
+import { eq, and, asc, gte, lte, inArray, isNull } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 
 const { sprints, workspaceMembers, sprintTasks, tasks, taskActivities } = schema;
@@ -87,6 +87,21 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       if (validatedData.goal !== undefined) updateData.goal = validatedData.goal;
 
       const [updatedSprint] = await db.update(sprints).set(updateData).where(eq(sprints.id, sprintId)).returning();
+
+      // Auto-archive done tasks when sprint is completed
+      if (validatedData.status === "completed") {
+        const sprintTaskRelations = await db.query.sprintTasks.findMany({
+          where: eq(sprintTasks.sprintId, sprintId),
+          with: { task: true },
+        });
+        const doneTaskIds = sprintTaskRelations
+          .filter(st => st.task.status === "done" || st.task.status === "closed" || st.task.status === "complete")
+          .map(st => st.taskId);
+        if (doneTaskIds.length > 0) {
+          await db.update(tasks).set({ archivedAt: new Date() }).where(and(inArray(tasks.id, doneTaskIds), isNull(tasks.archivedAt)));
+        }
+      }
+
       return { sprint: updatedSprint };
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });

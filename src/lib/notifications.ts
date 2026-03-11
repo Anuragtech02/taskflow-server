@@ -1,7 +1,7 @@
 import { db, schema } from "../db/index.js";
 import { eq, or } from "drizzle-orm";
 import { sendTaskAssignedEmail, sendMentionEmail, sendTaskDueSoonEmail } from "./email.js";
-import { broadcastToWorkspace } from "../plugins/sse.js";
+import { broadcastToWorkspace, sendToUser } from "../plugins/sse.js";
 
 const { notifications, users, workspaceMembers } = schema;
 
@@ -89,44 +89,29 @@ export async function createNotification(params: CreateNotificationParams) {
 
   sendEmail();
 
+  const notificationData = {
+    id: notification.id,
+    title: notification.title,
+    message: notification.message,
+    type: notification.type,
+    userId: notification.userId,
+    entityType: params.entityType || null,
+    entityId: params.entityId || null,
+    spaceId: params.spaceId || null,
+    listId: params.listId || null,
+  };
+  const sseEvent = { type: "notification" as const, data: notificationData };
+
   if (params.workspaceId) {
-    const notificationData = {
-      id: notification.id,
-      title: notification.title,
-      message: notification.message,
-      type: notification.type,
-      userId: notification.userId,
-      entityType: params.entityType || null,
-      entityId: params.entityId || null,
-      spaceId: params.spaceId || null,
-      listId: params.listId || null,
-    };
-    broadcastToWorkspace(params.workspaceId, {
-      type: "notification",
-      data: notificationData,
-    });
+    sendToUser(params.workspaceId, params.userId, sseEvent);
   } else {
     try {
-      const notificationData = {
-        id: notification.id,
-        title: notification.title,
-        message: notification.message,
-        type: notification.type,
-        userId: notification.userId,
-        entityType: params.entityType || null,
-        entityId: params.entityId || null,
-        spaceId: params.spaceId || null,
-        listId: params.listId || null,
-      };
       const memberships = await db
         .select({ workspaceId: workspaceMembers.workspaceId })
         .from(workspaceMembers)
         .where(eq(workspaceMembers.userId, params.userId));
       for (const m of memberships) {
-        broadcastToWorkspace(m.workspaceId, {
-          type: "notification",
-          data: notificationData,
-        });
+        sendToUser(m.workspaceId, params.userId, sseEvent);
       }
     } catch {
       // Non-critical
