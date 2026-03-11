@@ -58,6 +58,7 @@ export default async function sseRoutes(fastify: FastifyInstance) {
       "X-Accel-Buffering": "no",
       "Access-Control-Allow-Origin": corsOrigin,
       "Access-Control-Allow-Credentials": "true",
+      "Alt-Svc": "clear",
     });
 
     // Send initial connection
