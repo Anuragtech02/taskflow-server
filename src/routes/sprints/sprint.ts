@@ -3,6 +3,8 @@ import { z } from "zod";
 import { db, schema } from "../../db/index.js";
 import { eq, and, asc, desc, gte, lte, inArray, isNull } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { config } from "../../config.js";
 
 const { sprints, workspaceMembers, sprintTasks, tasks, taskActivities, sprintRetroItems, users, lists } = schema;
 
@@ -478,6 +480,200 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       return reply.status(201).send({ task, addedToSprintId: nextSprint?.id || null });
     } catch (error) {
       console.error("Error converting retro item to task:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // ==================== AI SPRINT ANALYSIS ====================
+
+  // POST /sprints/:id/analyze
+  fastify.post("/sprints/:id/analyze", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: sprintId } = request.params as { id: string };
+    try {
+      const access = await checkSprintAccess(sprintId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Sprint not found" });
+
+      if (!config.geminiApiKey) return reply.status(500).send({ error: "AI analysis not configured" });
+
+      // Fetch sprint tasks with details
+      const sprintTaskRelations = await db.query.sprintTasks.findMany({
+        where: eq(sprintTasks.sprintId, sprintId),
+        with: {
+          task: {
+            with: {
+              assignees: { with: { user: { columns: { id: true, name: true } } } },
+              creator: { columns: { id: true, name: true } },
+              list: { columns: { id: true, name: true } },
+            },
+          },
+        },
+      });
+
+      const sprintTasksList = sprintTaskRelations.map(st => st.task);
+      const taskIds = sprintTasksList.map(t => t.id);
+
+      if (taskIds.length === 0) return reply.status(400).send({ error: "No tasks in this sprint to analyze" });
+
+      // Fetch ALL activities for these tasks
+      const activities = await db.query.taskActivities.findMany({
+        where: inArray(taskActivities.taskId, taskIds),
+        with: { user: { columns: { id: true, name: true } } },
+        orderBy: [asc(taskActivities.createdAt)],
+      });
+
+      // Build per-task analysis data
+      const taskAnalysis = sprintTasksList.map(task => {
+        const taskActs = activities.filter(a => a.taskId === task.id);
+        const statusChanges = taskActs.filter(a => a.action === "updated" && a.field === "status");
+
+        // Compute cycle times from status transitions
+        const transitions: { from: string; to: string; at: string }[] = [];
+        for (const sc of statusChanges) {
+          transitions.push({
+            from: sc.oldValue || "unknown",
+            to: sc.newValue || "unknown",
+            at: sc.createdAt.toISOString(),
+          });
+        }
+
+        // Count rework: how many times task went backwards (done/review → in_progress/todo)
+        const backwardStatuses = ["todo", "in_progress"];
+        const forwardStatuses = ["in_review", "review", "done", "closed", "complete"];
+        let reworkCount = 0;
+        for (const sc of statusChanges) {
+          if (forwardStatuses.includes(sc.oldValue || "") && backwardStatuses.includes(sc.newValue || "")) {
+            reworkCount++;
+          }
+        }
+
+        // Time in each status
+        const statusDurations: Record<string, number> = {};
+        let lastStatus = task.status || "todo";
+        let lastTime = task.createdAt;
+        for (const sc of statusChanges) {
+          const duration = sc.createdAt.getTime() - lastTime.getTime();
+          const statusKey = sc.oldValue || lastStatus;
+          statusDurations[statusKey] = (statusDurations[statusKey] || 0) + duration;
+          lastStatus = sc.newValue || lastStatus;
+          lastTime = sc.createdAt;
+        }
+        // Add time in current status up to now
+        const now = new Date();
+        statusDurations[lastStatus] = (statusDurations[lastStatus] || 0) + (now.getTime() - lastTime.getTime());
+
+        // Format durations as hours
+        const statusDurationsHours: Record<string, number> = {};
+        for (const [status, ms] of Object.entries(statusDurations)) {
+          statusDurationsHours[status] = Math.round((ms / (1000 * 60 * 60)) * 10) / 10;
+        }
+
+        const commentCount = taskActs.filter(a => a.action === "added_comment").length;
+        const assigneeChanges = taskActs.filter(a => a.action === "added_assignee" || a.action === "removed_assignee").length;
+
+        return {
+          title: task.title,
+          status: task.status,
+          priority: task.priority,
+          assignees: task.assignees.map(a => a.user.name).join(", ") || "Unassigned",
+          list: task.list?.name || "Unknown",
+          timeEstimateHours: task.timeEstimate ? Math.round(task.timeEstimate / 60) : null,
+          timeSpentHours: task.timeSpent ? Math.round(task.timeSpent / 60) : null,
+          statusTransitions: transitions,
+          statusDurationsHours,
+          reworkCount,
+          commentCount,
+          assigneeChanges,
+          totalStatusChanges: statusChanges.length,
+          createdAt: task.createdAt.toISOString(),
+        };
+      });
+
+      // Build the prompt
+      const sprint = access.sprint;
+      const prompt = `You are a senior engineering manager conducting a sprint retrospective analysis. Analyze the following sprint data and provide actionable insights.
+
+## Sprint: "${sprint.name}"
+- **Duration**: ${new Date(sprint.startDate).toLocaleDateString()} to ${new Date(sprint.endDate).toLocaleDateString()}
+- **Goal**: ${sprint.goal || "No goal set"}
+- **Total Tasks**: ${taskAnalysis.length}
+- **Completed**: ${taskAnalysis.filter(t => t.status === "done" || t.status === "closed" || t.status === "complete").length}
+- **Incomplete**: ${taskAnalysis.filter(t => t.status !== "done" && t.status !== "closed" && t.status !== "complete").length}
+
+## Task-Level Data:
+${taskAnalysis.map((t, i) => `
+### Task ${i + 1}: "${t.title}"
+- Status: ${t.status} | Priority: ${t.priority} | Assignees: ${t.assignees} | List: ${t.list}
+- Time estimate: ${t.timeEstimateHours ? t.timeEstimateHours + "h" : "None"} | Time spent: ${t.timeSpentHours ? t.timeSpentHours + "h" : "None"}
+- Status changes: ${t.totalStatusChanges} | Rework count (sent back): ${t.reworkCount} | Comments: ${t.commentCount}
+- Time per status (hours): ${JSON.stringify(t.statusDurationsHours)}
+- Transitions: ${t.statusTransitions.map(tr => `${tr.from}→${tr.to} at ${new Date(tr.at).toLocaleDateString()}`).join(", ") || "None"}
+`).join("")}
+
+## Analysis Instructions:
+Provide a structured analysis in markdown format with these sections:
+
+### 🏁 Sprint Overview
+A 2-3 sentence summary of how the sprint went overall.
+
+### ⏱️ Cycle Time Analysis
+- Which tasks took the longest to move from todo → in progress → done?
+- Where did tasks get stuck the most (which status had the longest duration)?
+- Are there bottlenecks in the workflow?
+
+### 🔄 Rework & Quality Issues
+- Which tasks were sent back (rework) and how many times?
+- What patterns do you see in tasks that needed rework?
+- Any tasks that bounced between statuses repeatedly?
+
+### 🎯 Impact & Priority Analysis
+- Were high-priority tasks completed on time?
+- Were there mismatches between priority and actual effort spent?
+- Which tasks had the most activity (comments, assignee changes)?
+
+### 👥 Team Workload
+- How was work distributed across team members?
+- Were there any overloaded individuals?
+
+### 💡 Recommendations
+- 3-5 specific, actionable recommendations for the next sprint based on the data.
+
+Keep the analysis data-driven and reference specific tasks by name. Be concise but insightful. Do not use generic advice — base everything on the actual data provided.`;
+
+      const genAI = new GoogleGenerativeAI(config.geminiApiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+      const result = await model.generateContent(prompt);
+      const summary = result.response.text();
+
+      // Store the analysis
+      await db.update(sprints).set({
+        aiSummary: summary,
+        aiSummaryGeneratedAt: new Date(),
+      }).where(eq(sprints.id, sprintId));
+
+      return { summary, generatedAt: new Date().toISOString() };
+    } catch (error) {
+      console.error("Error generating sprint analysis:", error);
+      return reply.status(500).send({ error: "Failed to generate AI analysis" });
+    }
+  });
+
+  // GET /sprints/:id/analyze
+  fastify.get("/sprints/:id/analyze", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: sprintId } = request.params as { id: string };
+    try {
+      const access = await checkSprintAccess(sprintId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Sprint not found" });
+
+      return {
+        summary: access.sprint.aiSummary || null,
+        generatedAt: access.sprint.aiSummaryGeneratedAt?.toISOString() || null,
+      };
+    } catch (error) {
+      console.error("Error fetching sprint analysis:", error);
       return reply.status(500).send({ error: "Internal server error" });
     }
   });

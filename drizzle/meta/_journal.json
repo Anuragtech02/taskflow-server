@@ -92,6 +92,13 @@
       "when": 1773223128114,
       "tag": "0012_sad_psynapse",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1773225776826,
+      "tag": "0013_yellow_shinko_yamashiro",
+      "breakpoints": true
     }
   ]
 }

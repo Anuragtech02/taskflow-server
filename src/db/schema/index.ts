@@ -307,6 +307,8 @@ export const sprints = pgTable(
     endDate: timestamp("end_date").notNull(),
     status: varchar("status", { length: 20 }).default("planned"),
     goal: text("goal"),
+    aiSummary: text("ai_summary"),
+    aiSummaryGeneratedAt: timestamp("ai_summary_generated_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => [index("sprints_workspace_idx").on(t.workspaceId)]
