@@ -443,14 +443,9 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       const body = request.body as { listId?: string };
       let listId = body.listId;
       if (!listId) {
-        const firstList = await db.query.lists.findFirst({
-          with: { space: true },
-          where: eq(lists.id, lists.id), // just get any list
-        });
-        // Find a list in this workspace
         const workspaceLists = await db.select({ id: lists.id }).from(lists)
           .innerJoin(schema.spaces, eq(lists.spaceId, schema.spaces.id))
-          .where(eq(schema.spaces.workspaceId, access.membership.workspaceId))
+          .where(eq(schema.spaces.workspaceId, access.sprint.workspaceId))
           .limit(1);
         if (workspaceLists.length === 0) return reply.status(400).send({ error: "No lists found in workspace. Provide a listId." });
         listId = workspaceLists[0].id;
@@ -471,7 +466,7 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       // If there's a next planned/active sprint, add the task to it
       const nextSprint = await db.query.sprints.findFirst({
         where: and(
-          eq(sprints.workspaceId, access.membership.workspaceId),
+          eq(sprints.workspaceId, access.sprint.workspaceId),
           inArray(sprints.status, ["planned", "active"]),
         ),
         orderBy: [asc(sprints.startDate)],
