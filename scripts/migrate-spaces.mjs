@@ -1,0 +1,13 @@
+import postgres from "postgres";
+const sql = postgres(process.env.DATABASE_URL);
+await sql.unsafe(`UPDATE tasks SET archived_at = NULL WHERE archived_at IS NOT NULL`);
+console.log("0014 done: unarchived all tasks");
+await sql.unsafe(`INSERT INTO spaces (id, workspace_id, name, icon, "order", created_at) SELECT gen_random_uuid(), w.id, 'General', 'folder', 0, NOW() FROM workspaces w WHERE NOT EXISTS (SELECT 1 FROM spaces s WHERE s.workspace_id = w.id)`);
+await sql.unsafe(`ALTER TABLE sprints ADD COLUMN IF NOT EXISTS space_id UUID REFERENCES spaces(id) ON DELETE CASCADE`);
+await sql.unsafe(`UPDATE sprints s SET space_id = (SELECT sp.id FROM sprint_tasks st JOIN tasks t ON st.task_id = t.id JOIN lists l ON t.list_id = l.id JOIN spaces sp ON l.space_id = sp.id WHERE st.sprint_id = s.id GROUP BY sp.id ORDER BY COUNT(*) DESC LIMIT 1) WHERE EXISTS (SELECT 1 FROM sprint_tasks WHERE sprint_id = s.id)`);
+await sql.unsafe(`UPDATE sprints s SET space_id = (SELECT sp.id FROM spaces sp WHERE sp.workspace_id = s.workspace_id ORDER BY sp."order" ASC, sp.created_at ASC LIMIT 1) WHERE s.space_id IS NULL`);
+await sql.unsafe(`UPDATE documents d SET space_id = (SELECT sp.id FROM spaces sp WHERE sp.workspace_id = d.workspace_id ORDER BY sp."order" ASC, sp.created_at ASC LIMIT 1) WHERE d.space_id IS NULL`);
+await sql.unsafe(`ALTER TABLE sprints ALTER COLUMN space_id SET NOT NULL`);
+await sql.unsafe(`ALTER TABLE documents ALTER COLUMN space_id SET NOT NULL`);
+console.log("0015 done: scoped sprints and docs to spaces");
+await sql.end();
