@@ -11,7 +11,7 @@ const updateDocumentSchema = z.object({
   content: z.record(z.string(), z.any()).optional(),
   icon: z.string().max(50).optional(),
   coverUrl: z.string().optional(),
-  spaceId: z.string().uuid().nullable().optional(),
+  spaceId: z.string().uuid().optional(),
   parentDocumentId: z.string().uuid().nullable().optional(),
 });
 
