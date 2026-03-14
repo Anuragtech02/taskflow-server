@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, asc, desc, gte, lte, inArray, isNull } from "drizzle-orm";
+import { eq, and, asc, desc, gte, lte, inArray } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from "../../config.js";
@@ -90,24 +90,6 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
 
       const [updatedSprint] = await db.update(sprints).set(updateData).where(eq(sprints.id, sprintId)).returning();
 
-      // Auto-archive done tasks when sprint is completed
-      if (validatedData.status === "completed") {
-        const sprintTaskRelations = await db.query.sprintTasks.findMany({
-          where: eq(sprintTasks.sprintId, sprintId),
-          with: { task: true },
-        });
-        const doneTaskIds = sprintTaskRelations
-          .filter(st => st.task.status === "done" || st.task.status === "closed" || st.task.status === "complete")
-          .map(st => st.taskId);
-        if (doneTaskIds.length > 0) {
-          await db.update(tasks).set({ archivedAt: new Date() }).where(and(inArray(tasks.id, doneTaskIds), isNull(tasks.archivedAt)));
-          fastify.sse.broadcastToWorkspace(access.membership.workspaceId, {
-            type: "task_updated",
-            data: { taskIds: doneTaskIds, userId: authResult.userId, sprintCompleted: true },
-          });
-        }
-      }
-
       return { sprint: updatedSprint };
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
@@ -153,8 +135,8 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
         with: { list: { with: { space: true } } },
       });
       if (!task) return reply.status(404).send({ error: "Task not found" });
-      if (task.list.space.workspaceId !== access.sprint.workspaceId) {
-        return reply.status(400).send({ error: "Task must belong to the same workspace as the sprint" });
+      if (access.sprint.spaceId && task.list.spaceId !== access.sprint.spaceId) {
+        return reply.status(400).send({ error: "Task must belong to the same space as the sprint" });
       }
 
       const existing = await db.query.sprintTasks.findFirst({
@@ -441,16 +423,15 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       if (!item) return reply.status(404).send({ error: "Retro item not found" });
       if (item.convertedTaskId) return reply.status(400).send({ error: "Already converted to a task" });
 
-      // Get the listId from the request body, or find the first list in the workspace
+      // Get the listId from the request body, or find the first list in the sprint's space
       const body = request.body as { listId?: string };
       let listId = body.listId;
       if (!listId) {
-        const workspaceLists = await db.select({ id: lists.id }).from(lists)
-          .innerJoin(schema.spaces, eq(lists.spaceId, schema.spaces.id))
-          .where(eq(schema.spaces.workspaceId, access.sprint.workspaceId))
+        const spaceLists = await db.select({ id: lists.id }).from(lists)
+          .where(eq(lists.spaceId, access.sprint.spaceId))
           .limit(1);
-        if (workspaceLists.length === 0) return reply.status(400).send({ error: "No lists found in workspace. Provide a listId." });
-        listId = workspaceLists[0].id;
+        if (spaceLists.length === 0) return reply.status(400).send({ error: "No lists found in space. Provide a listId." });
+        listId = spaceLists[0].id;
       }
 
       // Create the task
@@ -465,10 +446,10 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       // Link the retro item to the task
       await db.update(sprintRetroItems).set({ convertedTaskId: task.id }).where(eq(sprintRetroItems.id, itemId));
 
-      // If there's a next planned/active sprint, add the task to it
+      // If there's a next planned/active sprint in the same space, add the task to it
       const nextSprint = await db.query.sprints.findFirst({
         where: and(
-          eq(sprints.workspaceId, access.sprint.workspaceId),
+          eq(sprints.spaceId, access.sprint.spaceId),
           inArray(sprints.status, ["planned", "active"]),
         ),
         orderBy: [asc(sprints.startDate)],

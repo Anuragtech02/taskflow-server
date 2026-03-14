@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, asc, isNull } from "drizzle-orm";
+import { eq, and, asc, notInArray, sql } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { broadcastToWorkspace } from "../../plugins/sse.js";
@@ -107,16 +107,17 @@ export default async function listRoutes(fastify: FastifyInstance) {
     const authResult = await authenticateRequest(request);
     if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
     const { id: listId } = request.params as { id: string };
-    const { limit: l, offset: o, includeArchived } = request.query as { limit?: string; offset?: string; includeArchived?: string };
+    const { limit: l, offset: o, includeClosed } = request.query as { limit?: string; offset?: string; includeClosed?: string };
     const limit = Math.min(Math.max(parseInt(l || "200", 10) || 200, 1), 500);
     const offset = Math.max(parseInt(o || "0", 10) || 0, 0);
+    const closedStatuses = ["done", "closed", "complete"];
     try {
       const access = await checkListAccess(listId, authResult.userId);
       if (!access) return reply.status(404).send({ error: "List not found" });
       const listTasks = await db.query.tasks.findMany({
-        where: includeArchived === "true"
+        where: includeClosed === "true"
           ? eq(tasks.listId, listId)
-          : and(eq(tasks.listId, listId), isNull(tasks.archivedAt)),
+          : and(eq(tasks.listId, listId), notInArray(tasks.status, closedStatuses)),
         orderBy: [asc(tasks.order)],
         limit, offset,
         with: {
@@ -124,7 +125,9 @@ export default async function listRoutes(fastify: FastifyInstance) {
           creator: { columns: { id: true, name: true, email: true, avatarUrl: true } },
         },
       });
-      return { tasks: listTasks };
+      const [countResult] = await db.select({ count: sql<number>`count(*)::int` }).from(tasks).where(and(eq(tasks.listId, listId), sql`${tasks.status} IN ('done', 'closed', 'complete')`));
+      const closedCount = countResult?.count ?? 0;
+      return { tasks: listTasks, closedCount };
     } catch (error) {
       console.error("Error fetching tasks:", error);
       return reply.status(500).send({ error: "Internal server error" });

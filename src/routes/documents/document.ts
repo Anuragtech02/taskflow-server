@@ -1,10 +1,10 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, asc, isNull } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 
-const { documents, workspaceMembers } = schema;
+const { documents, spaces, workspaceMembers } = schema;
 
 const updateDocumentSchema = z.object({
   title: z.string().min(1).max(255).optional(),
@@ -138,11 +138,74 @@ export default async function documentRoutes(fastify: FastifyInstance) {
 
       const body = request.body as Record<string, unknown>;
       const validatedData = createDocumentSchema.parse(body);
-      const [document] = await db.insert(documents).values({ ...validatedData, workspaceId, creatorId: authResult.userId }).returning();
+
+      // Assign to provided spaceId or first space in workspace
+      let spaceId = validatedData.spaceId;
+      if (!spaceId) {
+        const firstSpace = await db.query.spaces.findFirst({
+          where: eq(spaces.workspaceId, workspaceId),
+          orderBy: [asc(spaces.order)],
+        });
+        if (!firstSpace) return reply.status(400).send({ error: "No spaces in workspace" });
+        spaceId = firstSpace.id;
+      }
+
+      const [document] = await db.insert(documents).values({ ...validatedData, workspaceId, spaceId, creatorId: authResult.userId }).returning();
       return reply.status(201).send({ document });
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
       console.error("Error creating document:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // GET /spaces/:spaceId/documents
+  fastify.get("/spaces/:spaceId/documents", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { spaceId } = request.params as { spaceId: string };
+    try {
+      const space = await db.query.spaces.findFirst({ where: eq(spaces.id, spaceId) });
+      if (!space) return reply.status(404).send({ error: "Space not found" });
+      const membership = await db.query.workspaceMembers.findFirst({
+        where: and(eq(workspaceMembers.workspaceId, space.workspaceId), eq(workspaceMembers.userId, authResult.userId)),
+      });
+      if (!membership) return reply.status(403).send({ error: "Access denied" });
+
+      const spaceDocuments = await db.query.documents.findMany({
+        where: eq(documents.spaceId, spaceId),
+        with: { creator: { columns: { id: true, name: true, avatarUrl: true } } },
+        limit: 500,
+      });
+      return { documents: spaceDocuments };
+    } catch (error) {
+      console.error("Error fetching space documents:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // POST /spaces/:spaceId/documents
+  fastify.post("/spaces/:spaceId/documents", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { spaceId } = request.params as { spaceId: string };
+    try {
+      const space = await db.query.spaces.findFirst({ where: eq(spaces.id, spaceId) });
+      if (!space) return reply.status(404).send({ error: "Space not found" });
+      const membership = await db.query.workspaceMembers.findFirst({
+        where: and(eq(workspaceMembers.workspaceId, space.workspaceId), eq(workspaceMembers.userId, authResult.userId)),
+      });
+      if (!membership) return reply.status(403).send({ error: "Access denied" });
+
+      const body = request.body as Record<string, unknown>;
+      const validatedData = createDocumentSchema.parse(body);
+      const [document] = await db.insert(documents).values({
+        ...validatedData, workspaceId: space.workspaceId, spaceId, creatorId: authResult.userId,
+      }).returning();
+      return reply.status(201).send({ document });
+    } catch (error) {
+      if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
+      console.error("Error creating space document:", error);
       return reply.status(500).send({ error: "Internal server error" });
     }
   });

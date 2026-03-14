@@ -302,6 +302,9 @@ export const sprints = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    spaceId: uuid("space_id")
+      .notNull()
+      .references(() => spaces.id, { onDelete: "cascade" }),
     name: varchar("name", { length: 255 }).notNull(),
     startDate: timestamp("start_date").notNull(),
     endDate: timestamp("end_date").notNull(),
@@ -311,7 +314,10 @@ export const sprints = pgTable(
     aiSummaryGeneratedAt: timestamp("ai_summary_generated_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
-  (t) => [index("sprints_workspace_idx").on(t.workspaceId)]
+  (t) => [
+    index("sprints_workspace_idx").on(t.workspaceId),
+    index("sprints_space_idx").on(t.spaceId),
+  ]
 );
 
 // ─── Sprint Tasks ─────────────────────────────────────────────────────────────
@@ -469,6 +475,8 @@ export const spacesRelations = relations(spaces, ({ one, many }) => ({
   folders: many(folders),
   lists: many(lists),
   views: many(views),
+  sprints: many(sprints),
+  documents: many(documents),
 }));
 
 export const foldersRelations = relations(folders, ({ one, many }) => ({
@@ -637,6 +645,10 @@ export const sprintsRelations = relations(sprints, ({ one, many }) => ({
     fields: [sprints.workspaceId],
     references: [workspaces.id],
   }),
+  space: one(spaces, {
+    fields: [sprints.spaceId],
+    references: [spaces.id],
+  }),
   sprintTasks: many(sprintTasks),
   retroItems: many(sprintRetroItems),
 }));
@@ -745,9 +757,9 @@ export const documents = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    spaceId: uuid("space_id").references(() => spaces.id, {
-      onDelete: "cascade",
-    }),
+    spaceId: uuid("space_id")
+      .notNull()
+      .references(() => spaces.id, { onDelete: "cascade" }),
     title: varchar("title", { length: 255 }).notNull(),
     content: jsonb("content").default({}),
     icon: varchar("icon", { length: 50 }).default("file-text"),
