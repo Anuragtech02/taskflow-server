@@ -26,7 +26,7 @@ export default async function passwordResetRoutes(fastify: FastifyInstance) {
         .where(eq(users.email, email.toLowerCase().trim()))
         .limit(1);
 
-      if (!user || !user.passwordHash) {
+      if (!user) {
         return { message: successMessage };
       }
 
