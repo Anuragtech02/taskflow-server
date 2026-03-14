@@ -21,9 +21,13 @@ export const users = pgTable("users", {
   passwordHash: text("password_hash"),
   avatarUrl: text("avatar_url"),
   emailNotifications: boolean("email_notifications").default(true),
+  resetToken: varchar("reset_token", { length: 255 }),
+  resetTokenExpiresAt: timestamp("reset_token_expires_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (t) => [
+  index("users_reset_token_idx").on(t.resetToken),
+]);
 
 // ─── Workspaces ───────────────────────────────────────────────────────────────
 export const workspaces = pgTable("workspaces", {

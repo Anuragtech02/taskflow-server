@@ -141,4 +141,24 @@ export async function sendInviteEmail(to: string, workspaceName: string, invited
   }
 }
 
+export async function sendPasswordResetEmail(to: string, token: string) {
+  if (!isEmailConfigured()) {
+    console.log(`[Email] Would send password reset email to ${to} with token ${token}`);
+    return { success: false, error: "Email not configured" };
+  }
+  const resetUrl = `${APP_URL}/reset-password?token=${token}`;
+  const html = getEmailTemplate(
+    "Reset your password",
+    "You requested a password reset for your TaskFlow account. Click the button below to set a new password. This link expires in 1 hour.",
+    { text: "Reset Password", url: resetUrl }
+  );
+  try {
+    const result = await resend!.emails.send({ from: FROM_EMAIL, to, subject: "Reset your TaskFlow password", html });
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("[Email] Failed to send password reset email:", error);
+    return { success: false, error };
+  }
+}
+
 export { isEmailConfigured };
