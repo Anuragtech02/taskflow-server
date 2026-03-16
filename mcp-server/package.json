@@ -1,6 +1,6 @@
 {
   "name": "taskflow-mcp-server",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "MCP server for TaskFlow – manage tasks, comments, and assignments from Claude Code",
   "type": "module",
   "bin": {
@@ -29,6 +29,7 @@
     "zod": "^3.24.4"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "tsx": "^4.19.4",
     "typescript": "^5.7.3"
   }
