@@ -73,6 +73,7 @@ export class TaskFlowClient {
       status?: string;
       priority?: string;
       dueDate?: string;
+      parentTaskId?: string;
     }
   ) {
     const body: Record<string, unknown> = { title: data.title };
@@ -91,6 +92,7 @@ export class TaskFlowClient {
     if (data.status !== undefined) body.status = data.status;
     if (data.priority !== undefined) body.priority = data.priority;
     if (data.dueDate !== undefined) body.dueDate = data.dueDate;
+    if (data.parentTaskId !== undefined) body.parentTaskId = data.parentTaskId;
 
     return this.request(`/lists/${listId}/tasks`, {
       method: "POST",
@@ -107,6 +109,7 @@ export class TaskFlowClient {
       priority?: string;
       dueDate?: string | null;
       listId?: string;
+      parentTaskId?: string | null;
     }
   ) {
     const body: Record<string, unknown> = {};
@@ -127,6 +130,7 @@ export class TaskFlowClient {
     if (data.priority !== undefined) body.priority = data.priority;
     if (data.dueDate !== undefined) body.dueDate = data.dueDate;
     if (data.listId !== undefined) body.listId = data.listId;
+    if (data.parentTaskId !== undefined) body.parentTaskId = data.parentTaskId;
 
     return this.request(`/tasks/${taskId}`, {
       method: "PATCH",

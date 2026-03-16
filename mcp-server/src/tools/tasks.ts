@@ -47,14 +47,20 @@ export function registerTaskTools(server: McpServer, client: TaskFlowClient) {
         .string()
         .optional()
         .describe("Due date in ISO 8601 format (e.g. 2025-12-31T00:00:00.000Z)"),
+      parentTaskId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe("Parent task ID to create this as a sub-task"),
     },
-    async ({ listId, title, description, status, priority, dueDate }) => {
+    async ({ listId, title, description, status, priority, dueDate, parentTaskId }) => {
       const data = await client.createTask(listId, {
         title,
         description,
         status,
         priority,
         dueDate,
+        parentTaskId,
       });
       return {
         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -86,8 +92,14 @@ export function registerTaskTools(server: McpServer, client: TaskFlowClient) {
         .string()
         .optional()
         .describe("Move task to a different list by providing the target list ID"),
+      parentTaskId: z
+        .string()
+        .uuid()
+        .nullable()
+        .optional()
+        .describe("Parent task ID to make this a sub-task, or null to detach from parent"),
     },
-    async ({ taskId, title, status, priority, description, dueDate, listId }) => {
+    async ({ taskId, title, status, priority, description, dueDate, listId, parentTaskId }) => {
       const data = await client.updateTask(taskId, {
         title,
         status,
@@ -95,6 +107,7 @@ export function registerTaskTools(server: McpServer, client: TaskFlowClient) {
         description,
         dueDate,
         listId,
+        parentTaskId,
       });
       return {
         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
