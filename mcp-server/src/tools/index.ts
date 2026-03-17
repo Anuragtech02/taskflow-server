@@ -5,6 +5,7 @@ import { registerTaskTools } from "./tasks.js";
 import { registerSearchTools } from "./search.js";
 import { registerCommentTools } from "./comments.js";
 import { registerAssigneeTools } from "./assignees.js";
+import { registerDocumentTools } from "./documents.js";
 
 export function registerTools(server: McpServer, client: TaskFlowClient) {
   registerWorkspaceTools(server, client);
@@ -12,4 +13,5 @@ export function registerTools(server: McpServer, client: TaskFlowClient) {
   registerSearchTools(server, client);
   registerCommentTools(server, client);
   registerAssigneeTools(server, client);
+  registerDocumentTools(server, client);
 }

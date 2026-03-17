@@ -86,6 +86,56 @@ export function formatTask(data: any): string {
   return JSON.stringify({ task: summary }, null, 2);
 }
 
+export function formatDocuments(data: any): string {
+  const docs = data?.documents || data;
+  if (!Array.isArray(docs)) return JSON.stringify(data);
+  return JSON.stringify({
+    documents: docs.map((doc: any) => {
+      const summary: Record<string, any> = {
+        id: doc.id,
+        title: doc.title,
+        updatedAt: doc.updatedAt,
+      };
+      if (doc.parentDocumentId) summary.parentDocumentId = doc.parentDocumentId;
+      if (doc.icon) summary.icon = doc.icon;
+      if (doc.creator) summary.createdBy = doc.creator.name;
+      return summary;
+    }),
+  }, null, 2);
+}
+
+export function formatDocument(data: any): string {
+  const doc = data?.document || data;
+  if (!doc?.id) return JSON.stringify(data);
+
+  const summary: Record<string, any> = {
+    id: doc.id,
+    title: doc.title,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+
+  if (doc.parentDocumentId) summary.parentDocumentId = doc.parentDocumentId;
+  if (doc.icon) summary.icon = doc.icon;
+  if (doc.creator) summary.createdBy = doc.creator.name;
+
+  // Extract content to plain text
+  if (doc.content?.content) {
+    const text = extractText(doc.content);
+    if (text) summary.content = text;
+  }
+
+  // Include child documents
+  if (data?.children?.length) {
+    summary.children = data.children.map((c: any) => ({
+      id: c.id,
+      title: c.title,
+    }));
+  }
+
+  return JSON.stringify({ document: summary }, null, 2);
+}
+
 export function formatSearchResults(data: any): string {
   const tasks = data?.tasks || data;
   if (!Array.isArray(tasks)) return JSON.stringify(data);

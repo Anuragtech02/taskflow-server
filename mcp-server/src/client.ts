@@ -157,4 +157,75 @@ export class TaskFlowClient {
       method: "DELETE",
     });
   }
+
+  async getDocuments(spaceId: string) {
+    return this.request(`/spaces/${spaceId}/documents`);
+  }
+
+  async getDocument(documentId: string) {
+    return this.request(`/documents/${documentId}`);
+  }
+
+  async createDocument(
+    spaceId: string,
+    data: {
+      title: string;
+      content?: string;
+      parentDocumentId?: string;
+    }
+  ) {
+    const body: Record<string, unknown> = { title: data.title };
+    if (data.content !== undefined) {
+      body.content = {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: data.content }],
+          },
+        ],
+      };
+    }
+    if (data.parentDocumentId !== undefined) body.parentDocumentId = data.parentDocumentId;
+
+    return this.request(`/spaces/${spaceId}/documents`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async updateDocument(
+    documentId: string,
+    data: {
+      title?: string;
+      content?: string;
+      parentDocumentId?: string | null;
+    }
+  ) {
+    const body: Record<string, unknown> = {};
+    if (data.title !== undefined) body.title = data.title;
+    if (data.content !== undefined) {
+      body.content = {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: data.content }],
+          },
+        ],
+      };
+    }
+    if (data.parentDocumentId !== undefined) body.parentDocumentId = data.parentDocumentId;
+
+    return this.request(`/documents/${documentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async deleteDocument(documentId: string) {
+    return this.request(`/documents/${documentId}`, {
+      method: "DELETE",
+    });
+  }
 }
