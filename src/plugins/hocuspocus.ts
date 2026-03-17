@@ -88,15 +88,16 @@ async function hocuspocusPlugin(fastify: FastifyInstance) {
         // Auto-version every 5 minutes
         const doc = await db.query.documents.findFirst({
           where: eq(documents.id, documentName),
-          columns: { lastVersionAt: true, title: true },
+          columns: { lastVersionAt: true, title: true, creatorId: true },
         });
 
         const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
         if (!doc?.lastVersionAt || doc.lastVersionAt < fiveMinAgo) {
+          const createdBy = doc!.creatorId;
           // Use atomic insert with subquery to prevent version numbering race
           await db.execute(sql`
             INSERT INTO document_versions (id, document_id, version_number, title, content, ydoc_state, created_by)
-            SELECT gen_random_uuid(), ${documentName}, COALESCE(MAX(version_number), 0) + 1, ${doc?.title || "Untitled"}, ${JSON.stringify(content || {})}::jsonb, ${Buffer.from(state)}, '00000000-0000-0000-0000-000000000000'
+            SELECT gen_random_uuid(), ${documentName}, COALESCE(MAX(version_number), 0) + 1, ${doc?.title || "Untitled"}, ${JSON.stringify(content || {})}::jsonb, ${Buffer.from(state)}, ${createdBy}
             FROM document_versions WHERE document_id = ${documentName}
           `);
 
