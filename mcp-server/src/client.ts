@@ -79,15 +79,7 @@ export class TaskFlowClient {
     const body: Record<string, unknown> = { title: data.title };
 
     if (data.description !== undefined) {
-      body.description = {
-        type: "doc",
-        content: [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text: data.description }],
-          },
-        ],
-      };
+      body.description = this.textToDoc(data.description);
     }
     if (data.status !== undefined) body.status = data.status;
     if (data.priority !== undefined) body.priority = data.priority;
@@ -116,15 +108,7 @@ export class TaskFlowClient {
 
     if (data.title !== undefined) body.title = data.title;
     if (data.description !== undefined) {
-      body.description = {
-        type: "doc",
-        content: [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text: data.description }],
-          },
-        ],
-      };
+      body.description = this.textToDoc(data.description);
     }
     if (data.status !== undefined) body.status = data.status;
     if (data.priority !== undefined) body.priority = data.priority;
@@ -158,6 +142,18 @@ export class TaskFlowClient {
     });
   }
 
+  private textToDoc(text: string) {
+    const lines = text.split("\n");
+    return {
+      type: "doc",
+      content: lines.map((line) =>
+        line.trim()
+          ? { type: "paragraph", content: [{ type: "text", text: line }] }
+          : { type: "paragraph" }
+      ),
+    };
+  }
+
   async getDocuments(spaceId: string) {
     return this.request(`/spaces/${spaceId}/documents`);
   }
@@ -176,15 +172,7 @@ export class TaskFlowClient {
   ) {
     const body: Record<string, unknown> = { title: data.title };
     if (data.content !== undefined) {
-      body.content = {
-        type: "doc",
-        content: [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text: data.content }],
-          },
-        ],
-      };
+      body.content = this.textToDoc(data.content);
     }
     if (data.parentDocumentId !== undefined) body.parentDocumentId = data.parentDocumentId;
 
@@ -205,15 +193,7 @@ export class TaskFlowClient {
     const body: Record<string, unknown> = {};
     if (data.title !== undefined) body.title = data.title;
     if (data.content !== undefined) {
-      body.content = {
-        type: "doc",
-        content: [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text: data.content }],
-          },
-        ],
-      };
+      body.content = this.textToDoc(data.content);
     }
     if (data.parentDocumentId !== undefined) body.parentDocumentId = data.parentDocumentId;
 
