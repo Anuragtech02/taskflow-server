@@ -63,6 +63,24 @@ async function hocuspocusPlugin(fastify: FastifyInstance) {
         if (doc?.ydocState) {
           const state = doc.ydocState as Buffer;
           Y.applyUpdate(document, new Uint8Array(state));
+        } else if (doc?.content && typeof doc.content === "object" && (doc.content as any).content?.length) {
+          // No ydocState but content exists (e.g. created via API/MCP)
+          // Insert content into the Yjs XML fragment so the editor renders it
+          const fragment = document.getXmlFragment("default");
+          const jsonContent = doc.content as { type?: string; content?: any[] };
+          if (jsonContent.content) {
+            for (const node of jsonContent.content) {
+              const el = new Y.XmlElement(node.type || "paragraph");
+              if (node.content) {
+                for (const child of node.content) {
+                  if (child.type === "text" && child.text) {
+                    el.insert(0, [new Y.XmlText(child.text)]);
+                  }
+                }
+              }
+              fragment.push([el]);
+            }
+          }
         }
       } catch (err) {
         console.error(`Failed to load document ${documentName}:`, err);
