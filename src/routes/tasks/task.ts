@@ -182,8 +182,28 @@ export default async function taskRoutes(fastify: FastifyInstance) {
         // Log activity for each changed field
         const changedFields = Object.keys(validatedData) as Array<keyof typeof validatedData>;
         for (const field of changedFields) {
-          const oldValue = String(oldTask[field as keyof typeof oldTask] ?? "");
-          const newValue = String(validatedData[field] ?? "");
+          let oldValue = String(oldTask[field as keyof typeof oldTask] ?? "");
+          let newValue = String(validatedData[field] ?? "");
+
+          // Resolve IDs to human-readable names for activity log
+          if (field === "listId") {
+            oldValue = oldTask.list?.name || oldValue;
+            // targetList is fetched above when listId changes
+            if (validatedData.listId) {
+              const tl = await tx.query.lists.findFirst({ where: eq(lists.id, validatedData.listId), columns: { name: true } });
+              newValue = tl?.name || newValue;
+            }
+          } else if (field === "parentTaskId") {
+            if (oldTask.parentTaskId) {
+              const pt = await tx.query.tasks.findFirst({ where: eq(tasks.id, oldTask.parentTaskId), columns: { title: true } });
+              oldValue = pt?.title || oldValue;
+            }
+            if (validatedData.parentTaskId) {
+              const pt = await tx.query.tasks.findFirst({ where: eq(tasks.id, validatedData.parentTaskId), columns: { title: true } });
+              newValue = pt?.title || newValue;
+            }
+          }
+
           if (oldValue !== newValue) {
             await tx.insert(taskActivities).values({ taskId, userId: authResult.userId, action: "updated", field, oldValue, newValue });
           }
