@@ -316,8 +316,36 @@ async function analyzeSprintInventory() {
   }
 }
 
+async function listsHaveSprintId(): Promise<boolean> {
+  const r = await db.execute<{ ok: boolean }>(sql`
+    SELECT EXISTS(
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='lists' AND column_name='sprint_id'
+    ) AS ok
+  `);
+  return ((r as unknown as { ok: boolean }[])[0]?.ok) === true;
+}
+
 async function analyzeModelB() {
   header("MIGRATION 3: Model B — sprint becomes a list");
+
+  if (await listsHaveSprintId()) {
+    // Already migrated. Print a verification snapshot instead of the pre-plan.
+    const summary = await db.execute<{ total_sprints: number; sprints_with_list: number; archived_lists: number; sprint_lists: number }>(sql`
+      SELECT
+        (SELECT COUNT(*)::int FROM ${sprints})                                       AS total_sprints,
+        (SELECT COUNT(*)::int FROM ${sprints} s JOIN ${lists} l ON l.sprint_id = s.id) AS sprints_with_list,
+        (SELECT COUNT(*)::int FROM ${lists} WHERE archived_at IS NOT NULL)            AS archived_lists,
+        (SELECT COUNT(*)::int FROM ${lists} WHERE kind = 'sprint')                    AS sprint_lists
+    `);
+    const s = (summary as unknown as { total_sprints: number; sprints_with_list: number; archived_lists: number; sprint_lists: number }[])[0];
+    console.log("\n  ✓ Migration 3 already applied — lists.sprint_id column is present.");
+    console.log(`    sprints with linked list:   ${s.sprints_with_list} / ${s.total_sprints}`);
+    console.log(`    lists with kind='sprint':   ${s.sprint_lists}`);
+    console.log(`    archived lists:             ${s.archived_lists}`);
+    return;
+  }
+
 
   // Per space: how many sprints, how many tasks linked via sprintTasks
   const perSpace = await db.execute<{

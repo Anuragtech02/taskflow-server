@@ -100,6 +100,10 @@ export const folders = pgTable(
 );
 
 // ─── Lists ────────────────────────────────────────────────────────────────────
+// `kind` distinguishes general workflow lists from sprint-backed lists.
+// When `kind = 'sprint'`, `sprintId` is set and the list represents that sprint
+// (one sprint <-> one list). `archivedAt` is set when the sprint completes (or
+// the list is otherwise closed); active queries default to `archivedAt IS NULL`.
 export const lists = pgTable(
   "lists",
   {
@@ -113,11 +117,18 @@ export const lists = pgTable(
     name: varchar("name", { length: 255 }).notNull(),
     description: text("description"),
     order: integer("order").default(0),
+    kind: varchar("kind", { length: 20 }).default("general").notNull(), // 'general' | 'sprint' | 'backlog'
+    sprintId: uuid("sprint_id"),
+    archivedAt: timestamp("archived_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => [
     index("lists_folder_idx").on(t.folderId),
     index("lists_space_idx").on(t.spaceId),
+    index("lists_archived_idx").on(t.archivedAt),
+    // Each sprint can be linked to at most one list. Partial: only constrains
+    // rows where sprint_id is set (general lists can freely have NULL).
+    uniqueIndex("lists_sprint_unique").on(t.sprintId).where(sql`${t.sprintId} IS NOT NULL`),
   ]
 );
 
@@ -517,6 +528,10 @@ export const listsRelations = relations(lists, ({ one, many }) => ({
     fields: [lists.spaceId],
     references: [spaces.id],
   }),
+  sprint: one(sprints, {
+    fields: [lists.sprintId],
+    references: [sprints.id],
+  }),
   tasks: many(tasks),
   views: many(views),
 }));
@@ -667,6 +682,12 @@ export const sprintsRelations = relations(sprints, ({ one, many }) => ({
   space: one(spaces, {
     fields: [sprints.spaceId],
     references: [spaces.id],
+  }),
+  // 1:1 list link, set when the sprint is created (or migrated). May be null for
+  // sprints whose list hasn't been created yet (transitional / edge cases).
+  list: one(lists, {
+    fields: [sprints.id],
+    references: [lists.sprintId],
   }),
   sprintTasks: many(sprintTasks),
   retroItems: many(sprintRetroItems),

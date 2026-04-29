@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db, schema } from "../../db/index.js";
 import { eq, and, asc } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
+import { ensureSprintList } from "../../lib/sprint-list.js";
 
 const { sprints, spaces, workspaceMembers } = schema;
 
@@ -58,6 +59,9 @@ export default async function workspaceSprintRoutes(fastify: FastifyInstance) {
         startDate: new Date(validatedData.startDate), endDate: new Date(validatedData.endDate),
         goal: validatedData.goal || null,
       }).returning();
+      // Model B: every sprint owns a list. Create it now so task assignment
+      // and the sprint UI can reference it immediately.
+      await ensureSprintList(sprint.id);
       return reply.status(201).send({ sprint });
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
@@ -108,6 +112,9 @@ export default async function workspaceSprintRoutes(fastify: FastifyInstance) {
         startDate: new Date(validatedData.startDate), endDate: new Date(validatedData.endDate),
         goal: validatedData.goal || null,
       }).returning();
+      // Model B: every sprint owns a list. Create it now so task assignment
+      // and the sprint UI can reference it immediately.
+      await ensureSprintList(sprint.id);
       return reply.status(201).send({ sprint });
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });

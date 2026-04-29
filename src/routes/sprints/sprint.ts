@@ -5,6 +5,13 @@ import { eq, and, asc, desc, gte, lte, inArray } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from "../../config.js";
+import {
+  ensureSprintList,
+  archiveSprintList,
+  unarchiveSprintList,
+  assignTaskToSprintAndList,
+  unassignTaskFromSprints,
+} from "../../lib/sprint-list.js";
 
 const { sprints, workspaceMembers, sprintTasks, tasks, taskActivities, sprintRetroItems, users, lists } = schema;
 
@@ -90,6 +97,21 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
 
       const [updatedSprint] = await db.update(sprints).set(updateData).where(eq(sprints.id, sprintId)).returning();
 
+      // Model B: keep the sprint's list in sync with the sprint state.
+      // - Status flipped to 'completed': archive the list with the sprint's end date.
+      // - Status flipped back away from 'completed': clear the archive flag.
+      // - Name renamed: rename the list to match.
+      if (validatedData.status !== undefined) {
+        if (validatedData.status === "completed") {
+          await archiveSprintList(sprintId, updatedSprint.endDate);
+        } else {
+          await unarchiveSprintList(sprintId);
+        }
+      }
+      if (validatedData.name !== undefined) {
+        await db.update(lists).set({ name: validatedData.name }).where(eq(lists.sprintId, sprintId));
+      }
+
       return { sprint: updatedSprint };
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
@@ -109,6 +131,14 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       if (!["owner", "admin"].includes(access.membership.role)) return reply.status(403).send({ error: "Access denied" });
 
       await db.transaction(async (tx) => {
+        // Demote the linked list (if any) so we don't leave an orphan
+        // `sprint_id` reference + a dangling kind='sprint' marker.
+        // Tasks in the list are preserved; the list itself becomes a
+        // regular general list and is archived.
+        await tx
+          .update(lists)
+          .set({ kind: "general", sprintId: null, archivedAt: new Date() })
+          .where(eq(lists.sprintId, sprintId));
         await tx.delete(sprintTasks).where(eq(sprintTasks.sprintId, sprintId));
         await tx.delete(sprints).where(eq(sprints.id, sprintId));
       });
@@ -144,7 +174,8 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       });
       if (existing) return reply.status(400).send({ error: "Task already in sprint" });
 
-      await db.insert(sprintTasks).values({ sprintId, taskId: validatedData.taskId });
+      // Model B: helper handles sprint_tasks junction AND tasks.list_id move atomically.
+      await assignTaskToSprintAndList(validatedData.taskId, sprintId);
       return reply.status(201).send({ success: true });
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
@@ -211,7 +242,9 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       const access = await checkSprintAccess(sprintId, authResult.userId);
       if (!access) return reply.status(404).send({ error: "Sprint not found" });
 
-      await db.delete(sprintTasks).where(and(eq(sprintTasks.sprintId, sprintId), eq(sprintTasks.taskId, taskId)));
+      // Model B: drop the junction row AND move the task to the space's
+      // Backlog list so it doesn't sit in a (potentially archived) sprint list.
+      await unassignTaskFromSprints(taskId);
       return { success: true };
     } catch (error) {
       console.error("Error removing task from sprint:", error);
@@ -232,10 +265,9 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       const toAccess = await checkSprintAccess(toSprintId, authResult.userId);
       if (!toAccess) return reply.status(403).send({ error: "Access denied to destination sprint" });
 
-      await db.transaction(async (tx) => {
-        await tx.delete(sprintTasks).where(and(eq(sprintTasks.sprintId, fromSprintId), eq(sprintTasks.taskId, taskId)));
-        await tx.insert(sprintTasks).values({ sprintId: toSprintId, taskId }).onConflictDoNothing();
-      });
+      // Model B: assignTaskToSprintAndList drops any prior sprint_tasks rows
+      // and moves the task's list_id atomically.
+      await assignTaskToSprintAndList(taskId, toSprintId);
       return { success: true };
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
@@ -255,7 +287,7 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       const access = await checkSprintAccess(sprintId, authResult.userId);
       if (!access) return reply.status(403).send({ error: "Access denied" });
 
-      await db.insert(sprintTasks).values({ sprintId, taskId }).onConflictDoNothing();
+      await assignTaskToSprintAndList(taskId, sprintId);
       return reply.status(201).send({ success: true });
     } catch (error) {
       console.error("Error adding task to sprint:", error);
@@ -274,7 +306,7 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       const access = await checkSprintAccess(sprintId, authResult.userId);
       if (!access) return reply.status(403).send({ error: "Access denied" });
 
-      await db.delete(sprintTasks).where(and(eq(sprintTasks.sprintId, sprintId), eq(sprintTasks.taskId, taskId)));
+      await unassignTaskFromSprints(taskId);
       return { success: true };
     } catch (error) {
       console.error("Error removing task from sprint:", error);

@@ -6,6 +6,7 @@ import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { autoCreateDueDateReminder } from "../../lib/reminders.js";
 import { createNotification, notifyMentions } from "../../lib/notifications.js";
+import { assignTaskToSprintAndList, unassignTaskFromSprints } from "../../lib/sprint-list.js";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { config } from "../../config.js";
 import { randomUUID } from "crypto";
@@ -1169,8 +1170,10 @@ export default async function taskRoutes(fastify: FastifyInstance) {
         return reply.status(400).send({ error: "Sprint must be in the same workspace as the task" });
       }
 
-      await db.delete(sprintTasks).where(eq(sprintTasks.taskId, taskId));
-      await db.insert(sprintTasks).values({ sprintId, taskId });
+      // Model B: assignTaskToSprintAndList ensures the sprint has its list,
+      // updates the sprint_tasks junction (single-sprint policy), and moves
+      // tasks.list_id to point at the sprint's list — all in one transaction.
+      await assignTaskToSprintAndList(taskId, sprintId);
       await db.insert(taskActivities).values({ taskId, userId: authResult.userId, action: "updated", field: "sprint", newValue: sprint.name });
       return { success: true };
     } catch (error) {
@@ -1193,7 +1196,9 @@ export default async function taskRoutes(fastify: FastifyInstance) {
         .from(sprintTasks).innerJoin(sprints, eq(sprintTasks.sprintId, sprints.id)).where(eq(sprintTasks.taskId, taskId)).limit(1);
       const sprintName = currentSprint[0]?.sprintName || "sprint";
 
-      await db.delete(sprintTasks).where(eq(sprintTasks.taskId, taskId));
+      // Model B: unassign drops the sprint_tasks row AND moves the task to the
+      // space's Backlog list so it doesn't stay in a now-archived sprint list.
+      await unassignTaskFromSprints(taskId);
       await db.insert(taskActivities).values({ taskId, userId: authResult.userId, action: "updated", field: "sprint", oldValue: sprintName, newValue: null });
       return { success: true };
     } catch (error) {
