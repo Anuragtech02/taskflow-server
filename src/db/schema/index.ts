@@ -217,19 +217,25 @@ export const taskActivities = pgTable(
 );
 
 // ─── Custom Field Definitions ─────────────────────────────────────────────────
+// Workspace-scoped (was list-scoped pre-0017). One row per (workspace_id, lower(name), type).
+// `tasks.customFields` jsonb stores values keyed by the definition's UUID `id`,
+// so renaming the parent scope from list to workspace doesn't migrate task values.
 export const customFieldDefinitions = pgTable(
   "custom_field_definitions",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    listId: uuid("list_id")
+    workspaceId: uuid("workspace_id")
       .notNull()
-      .references(() => lists.id, { onDelete: "cascade" }),
+      .references(() => workspaces.id, { onDelete: "cascade" }),
     name: varchar("name", { length: 255 }).notNull(),
     type: varchar("type", { length: 50 }).notNull(),
     options: jsonb("options").default({}),
     order: integer("order").default(0),
   },
-  (t) => [index("cfd_list_idx").on(t.listId)]
+  (t) => [
+    index("cfd_workspace_idx").on(t.workspaceId),
+    uniqueIndex("cfd_workspace_name_type_unique").on(t.workspaceId, sql`LOWER(${t.name})`, t.type),
+  ]
 );
 
 // ─── Time Entries ─────────────────────────────────────────────────────────────
@@ -465,6 +471,7 @@ export const workspacesRelations = relations(workspaces, ({ one, many }) => ({
   labels: many(labels),
   sprints: many(sprints),
   statuses: many(statuses),
+  customFieldDefinitions: many(customFieldDefinitions),
 }));
 
 export const workspaceMembersRelations = relations(
@@ -511,7 +518,6 @@ export const listsRelations = relations(lists, ({ one, many }) => ({
     references: [spaces.id],
   }),
   tasks: many(tasks),
-  customFieldDefinitions: many(customFieldDefinitions),
   views: many(views),
 }));
 
@@ -609,9 +615,9 @@ export const taskAttachmentsRelations = relations(taskAttachments, ({ one }) => 
 export const customFieldDefinitionsRelations = relations(
   customFieldDefinitions,
   ({ one }) => ({
-    list: one(lists, {
-      fields: [customFieldDefinitions.listId],
-      references: [lists.id],
+    workspace: one(workspaces, {
+      fields: [customFieldDefinitions.workspaceId],
+      references: [workspaces.id],
     }),
   })
 );

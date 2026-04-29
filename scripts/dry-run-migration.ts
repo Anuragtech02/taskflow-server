@@ -143,8 +143,37 @@ async function analyzeStatuses() {
   console.log(`  - statuses.list_id stays nullable as a deprecation tombstone (drop in a follow-up).`);
 }
 
+async function customFieldsHaveListId(): Promise<boolean> {
+  const r = await db.execute<{ ok: boolean }>(sql`
+    SELECT EXISTS(
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='custom_field_definitions' AND column_name='list_id'
+    ) AS ok
+  `);
+  return ((r as unknown as { ok: boolean }[])[0]?.ok) === true;
+}
+
+async function customFieldsAreWorkspaceScoped(): Promise<boolean> {
+  const r = await db.execute<{ ok: boolean }>(sql`
+    SELECT EXISTS(
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='custom_field_definitions' AND column_name='workspace_id'
+    ) AS ok
+  `);
+  return ((r as unknown as { ok: boolean }[])[0]?.ok) === true;
+}
+
 async function analyzeCustomFields() {
   header("MIGRATION 2: custom_field_definitions → workspace-scoped");
+
+  const hasListId = await customFieldsHaveListId();
+  const hasWorkspaceId = await customFieldsAreWorkspaceScoped();
+
+  if (!hasListId && hasWorkspaceId) {
+    console.log("\n  ✓ Migration 2 already applied — custom_field_definitions.list_id is gone, workspace_id is present.");
+    console.log("    Skipping pre-migration analysis. Run a separate post-migration verification if needed.");
+    return;
+  }
 
   const rows = await db.execute<{
     workspace_id: string; workspace_name: string; total_cfds: number; distinct_signatures: number;

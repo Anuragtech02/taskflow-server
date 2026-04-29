@@ -6,7 +6,7 @@ import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { broadcastToWorkspace } from "../../plugins/sse.js";
 
-const { lists, spaces, tasks, taskActivities, workspaceMembers, customFieldDefinitions } = schema;
+const { lists, spaces, tasks, taskActivities, workspaceMembers } = schema;
 
 async function checkListAccess(listId: string, userId: string) {
   const list = await db.query.lists.findFirst({ where: eq(lists.id, listId), with: { space: true } });
@@ -200,88 +200,4 @@ export default async function listRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // GET /lists/:id/custom-fields
-  fastify.get("/lists/:id/custom-fields", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId } = request.params as { id: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      const fields = await db.select().from(customFieldDefinitions).where(eq(customFieldDefinitions.listId, listId)).orderBy(asc(customFieldDefinitions.order));
-      return { fields };
-    } catch (error) {
-      console.error("Error fetching custom fields:", error);
-      return reply.status(500).send({ error: "Failed to fetch custom fields" });
-    }
-  });
-
-  // POST /lists/:id/custom-fields
-  fastify.post("/lists/:id/custom-fields", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId } = request.params as { id: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      const { name, type, options } = request.body as { name?: string; type?: string; options?: Record<string, unknown> };
-      if (!name) return reply.status(400).send({ error: "Field name is required" });
-      const validTypes = ["text", "textarea", "number", "date", "time", "datetime", "checkbox", "select", "multiSelect", "url", "email", "phone", "currency", "percentage", "user"];
-      if (!type || !validTypes.includes(type)) return reply.status(400).send({ error: `Invalid field type. Valid types: ${validTypes.join(", ")}` });
-
-      const max = await db.select({ order: customFieldDefinitions.order }).from(customFieldDefinitions).where(eq(customFieldDefinitions.listId, listId)).orderBy(customFieldDefinitions.order).limit(1);
-      const newOrder = max.length > 0 ? (max[0].order ?? 0) + 1 : 0;
-
-      const [newField] = await db.insert(customFieldDefinitions).values({ listId, name, type, options: options || {}, order: newOrder }).returning();
-      return reply.status(201).send({ field: newField });
-    } catch (error) {
-      console.error("Error creating custom field:", error);
-      return reply.status(500).send({ error: "Failed to create custom field" });
-    }
-  });
-
-  // PUT /lists/:id/custom-fields/:fieldId
-  fastify.put("/lists/:id/custom-fields/:fieldId", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId, fieldId } = request.params as { id: string; fieldId: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      const { name, type, options, order } = request.body as { name?: string; type?: string; options?: Record<string, unknown>; order?: number };
-      const validTypes = ["text", "textarea", "number", "date", "time", "datetime", "checkbox", "select", "multiSelect", "url", "email", "phone", "currency", "percentage", "user"];
-      if (type && !validTypes.includes(type)) return reply.status(400).send({ error: `Invalid field type` });
-
-      const updateData: Record<string, unknown> = {};
-      if (name !== undefined) updateData.name = name;
-      if (type !== undefined) updateData.type = type;
-      if (options !== undefined) updateData.options = options;
-      if (order !== undefined) updateData.order = order;
-
-      const [updated] = await db.update(customFieldDefinitions).set(updateData).where(and(eq(customFieldDefinitions.id, fieldId), eq(customFieldDefinitions.listId, listId))).returning();
-      if (!updated) return reply.status(404).send({ error: "Custom field not found" });
-      return { field: updated };
-    } catch (error) {
-      console.error("Error updating custom field:", error);
-      return reply.status(500).send({ error: "Failed to update custom field" });
-    }
-  });
-
-  // DELETE /lists/:id/custom-fields/:fieldId
-  fastify.delete("/lists/:id/custom-fields/:fieldId", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId, fieldId } = request.params as { id: string; fieldId: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      if (!["owner", "admin"].includes(access.membership.role)) return reply.status(403).send({ error: "Only owners and admins can delete custom fields" });
-      const [deleted] = await db.delete(customFieldDefinitions).where(and(eq(customFieldDefinitions.id, fieldId), eq(customFieldDefinitions.listId, listId))).returning();
-      if (!deleted) return reply.status(404).send({ error: "Custom field not found" });
-      return { success: true };
-    } catch (error) {
-      console.error("Error deleting custom field:", error);
-      return reply.status(500).send({ error: "Failed to delete custom field" });
-    }
-  });
 }
