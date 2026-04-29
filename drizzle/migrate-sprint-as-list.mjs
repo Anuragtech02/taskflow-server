@@ -249,14 +249,18 @@ try {
   }
   console.log(`[0018] step 4: ${sprintTaskPairs.length} tasks moved to their sprint list`);
 
-  // Step 5: stragglers — tasks in a "Sprint"-named list with no sprint_tasks row
+  // Step 5: stragglers — tasks living in a sprint-context list (named "Sprint"
+  // OR with kind='sprint') that don't have a corresponding sprint_tasks row
+  // pointing at the list's sprint. After step 3 claimed/renamed the original
+  // "Sprint" list as the active sprint's list, those untracked tasks need to
+  // be evicted to the Backlog.
   const stragglerSpaces = await sql`
     SELECT DISTINCT l.space_id
     FROM tasks t
     JOIN lists l ON l.id = t.list_id
     LEFT JOIN sprint_tasks st ON st.task_id = t.id
-    WHERE LOWER(l.name) IN ${sql(SPRINT_LIST_NAMES)}
-      AND l.sprint_id IS NULL  -- not yet claimed for a sprint
+                              AND (l.sprint_id IS NULL OR st.sprint_id = l.sprint_id)
+    WHERE (LOWER(l.name) IN ${sql(SPRINT_LIST_NAMES)} OR l.kind = 'sprint')
       AND st.task_id IS NULL
   `;
 
@@ -284,15 +288,17 @@ try {
       console.log(`[0018] step 5: using existing Backlog ${backlogId} in space ${row.space_id}`);
     }
 
-    // Move tasks (in batches) and audit each move
+    // Move tasks (in batches) and audit each move. Same predicate as the
+    // outer space discovery — tasks in a sprint-context list (by name or by
+    // kind='sprint') with no corresponding sprint_tasks row.
     const stragglers = await sql`
       SELECT t.id AS task_id, t.list_id AS current_list_id
       FROM tasks t
       JOIN lists l ON l.id = t.list_id
       LEFT JOIN sprint_tasks st ON st.task_id = t.id
+                                AND (l.sprint_id IS NULL OR st.sprint_id = l.sprint_id)
       WHERE l.space_id = ${row.space_id}
-        AND LOWER(l.name) IN ${sql(SPRINT_LIST_NAMES)}
-        AND l.sprint_id IS NULL
+        AND (LOWER(l.name) IN ${sql(SPRINT_LIST_NAMES)} OR l.kind = 'sprint')
         AND st.task_id IS NULL
     `;
     for (const t of stragglers) {

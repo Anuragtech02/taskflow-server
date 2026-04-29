@@ -748,6 +748,25 @@ export const remindersRelations = relations(reminders, ({ one }) => ({
   }),
 }));
 
+// ─── Migration Audit (Model B) ────────────────────────────────────────────────
+// Defined here only so `drizzle-kit push --force` doesn't drop the table the
+// 0018 migration script created. Not used at runtime by the API.
+export const migrationAuditModelB = pgTable(
+  "migration_audit_modelb",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    taskId: uuid("task_id").notNull(),
+    originalListId: uuid("original_list_id").notNull(),
+    newListId: uuid("new_list_id").notNull(),
+    reason: varchar("reason", { length: 50 }).notNull(),
+    ranAt: timestamp("ran_at").defaultNow().notNull(),
+  },
+  (t) => [
+    index("migration_audit_modelb_task_idx").on(t.taskId),
+    uniqueIndex("migration_audit_modelb_task_reason_unique").on(t.taskId, t.reason),
+  ]
+);
+
 // ─── API Keys ─────────────────────────────────────────────────────────────────
 export const apiKeys = pgTable(
   "api_keys",
