@@ -1,7 +1,10 @@
 #!/bin/sh
 set -e
 
-echo "Running database migrations..."
+echo "Running data migrations (idempotent, safe to rerun)..."
+node drizzle/migrate-workspace-statuses.mjs
+
+echo "Syncing schema..."
 npx drizzle-kit push --force
 echo "Migrations complete."
 

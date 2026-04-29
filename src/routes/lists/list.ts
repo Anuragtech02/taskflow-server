@@ -6,7 +6,7 @@ import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { broadcastToWorkspace } from "../../plugins/sse.js";
 
-const { lists, spaces, tasks, taskActivities, workspaceMembers, statuses, customFieldDefinitions } = schema;
+const { lists, spaces, tasks, taskActivities, workspaceMembers, customFieldDefinitions } = schema;
 
 async function checkListAccess(listId: string, userId: string) {
   const list = await db.query.lists.findFirst({ where: eq(lists.id, listId), with: { space: true } });
@@ -197,130 +197,6 @@ export default async function listRoutes(fastify: FastifyInstance) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
       console.error("Error creating bulk tasks:", error);
       return reply.status(500).send({ error: "Internal server error" });
-    }
-  });
-
-  // GET /lists/:id/statuses
-  fastify.get("/lists/:id/statuses", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId } = request.params as { id: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      const listStatuses = await db.select().from(statuses).where(eq(statuses.listId, listId)).orderBy(statuses.order);
-      return { statuses: listStatuses };
-    } catch (error) {
-      console.error("Error fetching statuses:", error);
-      return reply.status(500).send({ error: "Failed to fetch statuses" });
-    }
-  });
-
-  // POST /lists/:id/statuses
-  fastify.post("/lists/:id/statuses", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId } = request.params as { id: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      const { name, color, order } = request.body as { name?: string; color?: string; order?: number };
-      if (!name) return reply.status(400).send({ error: "Status name is required" });
-
-      const existing = await db.select().from(statuses).where(and(eq(statuses.listId, listId), eq(statuses.name, name))).limit(1);
-      if (existing.length > 0) return reply.status(400).send({ error: "Status name must be unique within this list" });
-
-      let newOrder = order;
-      if (newOrder === undefined || newOrder === null) {
-        const max = await db.select({ order: statuses.order }).from(statuses).where(eq(statuses.listId, listId)).orderBy(statuses.order).limit(1);
-        newOrder = max.length > 0 ? (max[0].order ?? 0) + 1 : 0;
-      }
-      const [newStatus] = await db.insert(statuses).values({ listId, name, color: color || "#6366f1", order: newOrder, isDefault: false }).returning();
-      return reply.status(201).send({ status: newStatus });
-    } catch (error) {
-      console.error("Error creating status:", error);
-      return reply.status(500).send({ error: "Failed to create status" });
-    }
-  });
-
-  // PUT /lists/:id/statuses/:statusId
-  fastify.put("/lists/:id/statuses/:statusId", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId, statusId } = request.params as { id: string; statusId: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      const { name, color, order } = request.body as { name?: string; color?: string; order?: number };
-
-      const existing = await db.select().from(statuses).where(and(eq(statuses.id, statusId), eq(statuses.listId, listId))).limit(1);
-      if (existing.length === 0) return reply.status(404).send({ error: "Status not found" });
-
-      if (name && name !== existing[0].name) {
-        const dup = await db.select().from(statuses).where(and(eq(statuses.listId, listId), eq(statuses.name, name))).limit(1);
-        if (dup.length > 0) return reply.status(400).send({ error: "Status name must be unique within this list" });
-      }
-
-      const [updated] = await db.update(statuses).set({
-        ...(name && { name }), ...(color && { color }), ...(order !== undefined && { order }),
-      }).where(and(eq(statuses.id, statusId), eq(statuses.listId, listId))).returning();
-      return { status: updated };
-    } catch (error) {
-      console.error("Error updating status:", error);
-      return reply.status(500).send({ error: "Failed to update status" });
-    }
-  });
-
-  // DELETE /lists/:id/statuses/:statusId
-  fastify.delete("/lists/:id/statuses/:statusId", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId, statusId } = request.params as { id: string; statusId: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      if (!["owner", "admin"].includes(access.membership.role)) return reply.status(403).send({ error: "Only owners and admins can delete statuses" });
-
-      const existing = await db.select().from(statuses).where(and(eq(statuses.id, statusId), eq(statuses.listId, listId))).limit(1);
-      if (existing.length === 0) return reply.status(404).send({ error: "Status not found" });
-
-      const statusName = existing[0].name.toLowerCase().replace(/\s+/g, "_");
-      const tasksWithStatus = await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.listId, listId), eq(tasks.status, statusName))).limit(1);
-
-      if (tasksWithStatus.length > 0) {
-        const remaining = await db.select().from(statuses).where(eq(statuses.listId, listId)).orderBy(statuses.order);
-        const other = remaining.filter(s => s.id !== statusId);
-        if (other.length > 0) {
-          const normalizedStatus = other[0].name.toLowerCase().replace(/\s+/g, "_");
-          await db.update(tasks).set({ status: normalizedStatus }).where(and(eq(tasks.listId, listId), eq(tasks.status, statusName)));
-        }
-      }
-      await db.delete(statuses).where(and(eq(statuses.id, statusId), eq(statuses.listId, listId)));
-      return { success: true };
-    } catch (error) {
-      console.error("Error deleting status:", error);
-      return reply.status(500).send({ error: "Failed to delete status" });
-    }
-  });
-
-  // PUT /lists/:id/statuses/reorder
-  fastify.put("/lists/:id/statuses/reorder", async (request, reply) => {
-    const authResult = await authenticateRequest(request);
-    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
-    const { id: listId } = request.params as { id: string };
-    try {
-      const access = await checkListAccess(listId, authResult.userId);
-      if (!access) return reply.status(403).send({ error: "Access denied" });
-      const { statusIds } = request.body as { statusIds?: string[] };
-      if (!statusIds || !Array.isArray(statusIds)) return reply.status(400).send({ error: "statusIds array is required" });
-      for (let i = 0; i < statusIds.length; i++) {
-        await db.update(statuses).set({ order: i }).where(and(eq(statuses.id, statusIds[i]), eq(statuses.listId, listId)));
-      }
-      const updated = await db.select().from(statuses).where(eq(statuses.listId, listId)).orderBy(statuses.order);
-      return { statuses: updated };
-    } catch (error) {
-      console.error("Error reordering statuses:", error);
-      return reply.status(500).send({ error: "Failed to reorder statuses" });
     }
   });
 

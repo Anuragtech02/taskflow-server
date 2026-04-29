@@ -9,9 +9,10 @@ import {
   jsonb,
   primaryKey,
   index,
+  uniqueIndex,
   customType,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 export const users = pgTable("users", {
@@ -255,19 +256,27 @@ export const timeEntries = pgTable(
 );
 
 // ─── Statuses ─────────────────────────────────────────────────────────────────
+// Workspace-scoped (was list-scoped pre-0016). One row per (workspace_id, lower(name)).
+// `tasks.status` references the status NAME (varchar), not the ID, so this rename
+// requires no FK rewiring on tasks.
 export const statuses = pgTable(
   "statuses",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    listId: uuid("list_id")
+    workspaceId: uuid("workspace_id")
       .notNull()
-      .references(() => lists.id, { onDelete: "cascade" }),
+      .references(() => workspaces.id, { onDelete: "cascade" }),
     name: varchar("name", { length: 255 }).notNull(),
     color: varchar("color", { length: 7 }).default("#6366f1"),
     order: integer("order").default(0),
     isDefault: boolean("is_default").default(false),
   },
-  (t) => [index("statuses_list_idx").on(t.listId)]
+  (t) => [
+    index("statuses_workspace_idx").on(t.workspaceId),
+    // Enforces "one row per (workspace, lower(name))" — prevents accidental duplicates
+    // and keeps drizzle-kit from dropping the index our migration created.
+    uniqueIndex("statuses_workspace_name_unique").on(t.workspaceId, sql`LOWER(${t.name})`),
+  ]
 );
 
 // ─── Labels ───────────────────────────────────────────────────────────────────
@@ -455,6 +464,7 @@ export const workspacesRelations = relations(workspaces, ({ one, many }) => ({
   spaces: many(spaces),
   labels: many(labels),
   sprints: many(sprints),
+  statuses: many(statuses),
 }));
 
 export const workspaceMembersRelations = relations(
@@ -502,7 +512,6 @@ export const listsRelations = relations(lists, ({ one, many }) => ({
   }),
   tasks: many(tasks),
   customFieldDefinitions: many(customFieldDefinitions),
-  statuses: many(statuses),
   views: many(views),
 }));
 
@@ -619,9 +628,9 @@ export const timeEntriesRelations = relations(timeEntries, ({ one }) => ({
 }));
 
 export const statusesRelations = relations(statuses, ({ one }) => ({
-  list: one(lists, {
-    fields: [statuses.listId],
-    references: [lists.id],
+  workspace: one(workspaces, {
+    fields: [statuses.workspaceId],
+    references: [workspaces.id],
   }),
 }));
 
