@@ -104,31 +104,58 @@ export default async function listRoutes(fastify: FastifyInstance) {
   });
 
   // GET /lists/:id/tasks
+  // Returns up to `limit` tasks (default 1000, max 5000). Order is deterministic
+  // — `(order ASC, created_at ASC, id ASC)` — so any future cursor-paginated
+  // client gets stable pages. `total` and `hasMore` let callers detect when
+  // a list legitimately exceeds the cap (today's lists shouldn't, post-PR-3).
   fastify.get("/lists/:id/tasks", async (request, reply) => {
     const authResult = await authenticateRequest(request);
     if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
     const { id: listId } = request.params as { id: string };
     const { limit: l, offset: o, includeClosed } = request.query as { limit?: string; offset?: string; includeClosed?: string };
-    const limit = Math.min(Math.max(parseInt(l || "200", 10) || 200, 1), 500);
+    const limit = Math.min(Math.max(parseInt(l || "1000", 10) || 1000, 1), 5000);
     const offset = Math.max(parseInt(o || "0", 10) || 0, 0);
     const closedStatuses = ["done", "closed", "complete"];
     try {
       const access = await checkListAccess(listId, authResult.userId);
       if (!access) return reply.status(404).send({ error: "List not found" });
+
+      const whereClause = includeClosed === "true"
+        ? eq(tasks.listId, listId)
+        : and(eq(tasks.listId, listId), notInArray(tasks.status, closedStatuses));
+
       const listTasks = await db.query.tasks.findMany({
-        where: includeClosed === "true"
-          ? eq(tasks.listId, listId)
-          : and(eq(tasks.listId, listId), notInArray(tasks.status, closedStatuses)),
-        orderBy: [asc(tasks.order)],
+        where: whereClause,
+        // Deterministic tiebreakers so two tasks with identical `order` (the
+        // common default of 0) don't shuffle between requests.
+        orderBy: [asc(tasks.order), asc(tasks.createdAt), asc(tasks.id)],
         limit, offset,
         with: {
           assignees: { with: { user: { columns: { id: true, name: true, email: true, avatarUrl: true } } } },
           creator: { columns: { id: true, name: true, email: true, avatarUrl: true } },
         },
       });
-      const [countResult] = await db.select({ count: sql<number>`count(*)::int` }).from(tasks).where(and(eq(tasks.listId, listId), sql`${tasks.status} IN ('done', 'closed', 'complete')`));
-      const closedCount = countResult?.count ?? 0;
-      return { tasks: listTasks, closedCount };
+
+      // Total count of tasks the WHERE clause matches — lets the client warn
+      // when its rendered set is shorter than the actual list (limit hit).
+      const [totalResult] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(tasks)
+        .where(whereClause);
+      const total = totalResult?.count ?? 0;
+
+      const [closedResult] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(tasks)
+        .where(and(eq(tasks.listId, listId), sql`${tasks.status} IN ('done', 'closed', 'complete')`));
+      const closedCount = closedResult?.count ?? 0;
+
+      return {
+        tasks: listTasks,
+        closedCount,
+        total,
+        hasMore: total > offset + listTasks.length,
+      };
     } catch (error) {
       console.error("Error fetching tasks:", error);
       return reply.status(500).send({ error: "Internal server error" });
