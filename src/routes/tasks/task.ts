@@ -6,7 +6,7 @@ import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { autoCreateDueDateReminder } from "../../lib/reminders.js";
 import { createNotification, notifyMentions } from "../../lib/notifications.js";
-import { assignTaskToSprintAndList, unassignTaskFromSprints } from "../../lib/sprint-list.js";
+import { assignTaskToSprintAndList, unassignTaskFromSprints, syncJunctionForListChange } from "../../lib/sprint-list.js";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { config } from "../../config.js";
 import { randomUUID } from "crypto";
@@ -211,6 +211,14 @@ export default async function taskRoutes(fastify: FastifyInstance) {
         }
         return [result];
       });
+
+      // Model B: when list_id changed, keep sprint_tasks in sync with the
+      // new list's sprint association (drag-drop / "move to list" parity
+      // with the dedicated Sprint dropdown).
+      if (validatedData.listId !== undefined && validatedData.listId !== oldTask.listId) {
+        try { await syncJunctionForListChange(taskId, validatedData.listId); }
+        catch (err) { console.error("Error syncing sprint_tasks junction:", err); }
+      }
 
       // Trigger automations for status change
       if (validatedData.status && validatedData.status !== oldTask.status) {

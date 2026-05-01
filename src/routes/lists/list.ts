@@ -5,6 +5,7 @@ import { eq, and, asc, notInArray, sql } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { broadcastToWorkspace } from "../../plugins/sse.js";
+import { syncJunctionForListChange } from "../../lib/sprint-list.js";
 
 const { lists, spaces, tasks, taskActivities, workspaceMembers } = schema;
 
@@ -152,6 +153,10 @@ export default async function listRoutes(fastify: FastifyInstance) {
       }).returning();
 
       await db.insert(taskActivities).values({ taskId: task.id, userId: authResult.userId, action: "created" });
+      // Model B: if this list represents a sprint, the new task is implicitly
+      // in that sprint — write the sprint_tasks row so burndown / retro / etc.
+      // pick it up.
+      try { await syncJunctionForListChange(task.id, listId); } catch (err) { console.error("Error syncing sprint_tasks junction:", err); }
       try { await runAutomations("task_created", { taskId: task.id, workspaceId: access.space.workspaceId, userId: authResult.userId }); } catch (err) { console.error("Error running automations:", err); }
       broadcastToWorkspace(access.space.workspaceId, { type: "task_created", data: { task, listId, spaceId: access.space.id, userId: authResult.userId } });
       return reply.status(201).send({ task });
@@ -189,8 +194,17 @@ export default async function listRoutes(fastify: FastifyInstance) {
         return task;
       }));
 
+      // Model B: if this list represents a sprint, all bulk-created tasks
+      // are implicitly in that sprint — write sprint_tasks rows for each.
+      try {
+        for (const task of createdTasks) {
+          await syncJunctionForListChange(task.id, listId);
+        }
+      } catch (err) { console.error("Error syncing sprint_tasks junction (bulk):", err); }
+
       for (const task of createdTasks) {
         try { await runAutomations("task_created", { taskId: task.id, workspaceId: access.space.workspaceId, userId: authResult.userId }); } catch (err) { console.error("Error running automations:", err); }
+        broadcastToWorkspace(access.space.workspaceId, { type: "task_created", data: { task, listId, spaceId: access.space.id, userId: authResult.userId } });
       }
       return reply.status(201).send({ tasks: createdTasks });
     } catch (error) {

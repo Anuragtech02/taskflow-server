@@ -154,6 +154,39 @@ export async function moveTasksToBacklog(spaceId: string, taskIds: string[]) {
 }
 
 /**
+ * Keep the sprint_tasks junction in sync when a task's list_id changes.
+ * Call this AFTER a task's list_id has been updated (whether the change
+ * came from a drag-drop, a "move to list" action, a new-task insert, etc.).
+ *
+ * Rules:
+ *   - target is a sprint-kind list → replace any existing junction row with
+ *     one pointing at the target's sprint (single-sprint policy)
+ *   - target is a non-sprint list → drop any existing junction rows for the
+ *     task (it's no longer in any sprint)
+ *
+ * Idempotent: re-calling with the same target is a no-op.
+ */
+export async function syncJunctionForListChange(taskId: string, newListId: string) {
+  const [list] = await db
+    .select({ id: lists.id, kind: lists.kind, sprintId: lists.sprintId })
+    .from(lists)
+    .where(eq(lists.id, newListId))
+    .limit(1);
+  if (!list) return;
+
+  if (list.kind === "sprint" && list.sprintId) {
+    const targetSprintId = list.sprintId;
+    await db.transaction(async (tx) => {
+      // Replace any prior sprint membership.
+      await tx.delete(sprintTasks).where(eq(sprintTasks.taskId, taskId));
+      await tx.insert(sprintTasks).values({ sprintId: targetSprintId, taskId });
+    });
+  } else {
+    await db.delete(sprintTasks).where(eq(sprintTasks.taskId, taskId));
+  }
+}
+
+/**
  * Mark a sprint's list as archived (completion timestamp). Idempotent —
  * passing the same end date doesn't re-trigger anything.
  */
