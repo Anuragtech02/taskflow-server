@@ -25,7 +25,14 @@ export async function getListForSprint(sprintId: string) {
 
 /**
  * Ensure a sprint has its 1:1 list, creating one if missing. Idempotent.
- * Returns the list. Pass an optional folderId/order for placement.
+ *
+ * Folder placement (3-way distinction on `opts.folderId`):
+ *   - omitted (undefined) → inherit from the most-recent sprint list in the
+ *     same space; if there is none, fall back to space root (NULL)
+ *   - explicit `null` → space root
+ *   - explicit string → that folder (caller's responsibility to validate)
+ *
+ * Returns the list.
  */
 export async function ensureSprintList(sprintId: string, opts?: { folderId?: string | null }) {
   const existing = await getListForSprint(sprintId);
@@ -33,6 +40,21 @@ export async function ensureSprintList(sprintId: string, opts?: { folderId?: str
 
   const [sprint] = await db.select().from(sprints).where(eq(sprints.id, sprintId)).limit(1);
   if (!sprint) throw new Error(`Sprint ${sprintId} not found`);
+
+  // Resolve folder placement. The 3-way distinction matters: undefined means
+  // "inherit"; null means "explicitly at space root"; a UUID is a chosen folder.
+  let folderId: string | null;
+  if (opts && Object.prototype.hasOwnProperty.call(opts, "folderId")) {
+    folderId = opts.folderId ?? null;
+  } else {
+    const [prev] = await db
+      .select({ folderId: lists.folderId })
+      .from(lists)
+      .where(and(eq(lists.spaceId, sprint.spaceId), eq(lists.kind, "sprint")))
+      .orderBy(sql`${lists.createdAt} DESC`)
+      .limit(1);
+    folderId = prev?.folderId ?? null;
+  }
 
   // Append after the highest-order list in the same space.
   const maxOrderRows = await db
@@ -45,7 +67,7 @@ export async function ensureSprintList(sprintId: string, opts?: { folderId?: str
     .insert(lists)
     .values({
       spaceId: sprint.spaceId,
-      folderId: opts?.folderId ?? null,
+      folderId,
       name: sprint.name,
       kind: "sprint",
       sprintId: sprint.id,

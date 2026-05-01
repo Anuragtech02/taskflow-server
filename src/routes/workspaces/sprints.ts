@@ -12,6 +12,9 @@ const createSprintSchema = z.object({
   startDate: z.string().datetime(),
   endDate: z.string().datetime(),
   goal: z.string().optional(),
+  // Optional explicit folder for the sprint's 1:1 list. If omitted, the list
+  // inherits the previous sprint's folder. Pass null to force space-root.
+  folderId: z.string().uuid().nullable().optional(),
 });
 
 export default async function workspaceSprintRoutes(fastify: FastifyInstance) {
@@ -60,8 +63,12 @@ export default async function workspaceSprintRoutes(fastify: FastifyInstance) {
         goal: validatedData.goal || null,
       }).returning();
       // Model B: every sprint owns a list. Create it now so task assignment
-      // and the sprint UI can reference it immediately.
-      await ensureSprintList(sprint.id);
+      // and the sprint UI can reference it immediately. Folder placement:
+      // explicit override if provided, otherwise inherit from previous sprint.
+      await ensureSprintList(
+        sprint.id,
+        validatedData.folderId === undefined ? undefined : { folderId: validatedData.folderId },
+      );
       return reply.status(201).send({ sprint });
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
@@ -113,8 +120,12 @@ export default async function workspaceSprintRoutes(fastify: FastifyInstance) {
         goal: validatedData.goal || null,
       }).returning();
       // Model B: every sprint owns a list. Create it now so task assignment
-      // and the sprint UI can reference it immediately.
-      await ensureSprintList(sprint.id);
+      // and the sprint UI can reference it immediately. Folder placement:
+      // explicit override if provided, otherwise inherit from previous sprint.
+      await ensureSprintList(
+        sprint.id,
+        validatedData.folderId === undefined ? undefined : { folderId: validatedData.folderId },
+      );
       return reply.status(201).send({ sprint });
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
