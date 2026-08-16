@@ -235,29 +235,62 @@ export default async function listRoutes(fastify: FastifyInstance) {
   });
 
   // Group key + how that group is ordered, for the grouped "ordered stream".
-  // assignee/label live in junction tables, so grouping by them LEFT JOINs and
-  // a task with N assignees legitimately appears once per group.
-  function groupSelectors(groupBy: GroupBy) {
+  //
+  // These MUST mirror the semantics the list view used when it grouped
+  // client-side, or the refactor would silently change what users see:
+  //  - assignee/label put a task in exactly ONE group (its first assignee /
+  //    first label), so we use a correlated subquery rather than a LEFT JOIN.
+  //    A join would multiply rows and show a 3-assignee task three times.
+  //  - dueDate buckets relatively (overdue/today/tomorrow/this_week/later)
+  //    rather than by calendar date. "Today" depends on the viewer's timezone,
+  //    so the client passes its local day boundaries in; we only compare.
+  function groupSelectors(groupBy: GroupBy, q: Record<string, string | undefined>) {
     switch (groupBy) {
       case "status":
-        return { key: sql<string>`COALESCE(${tasks.status}, 'none')`, order: sql`${tasks.status}` };
+        return { key: sql<string>`COALESCE(${tasks.status}, 'todo')`, order: sql`${tasks.status}` };
       case "priority":
         return { key: sql<string>`COALESCE(${tasks.priority}, 'none')`, order: priorityRank };
-      case "dueDate":
-        return {
-          key: sql<string>`COALESCE(TO_CHAR(${tasks.dueDate}, 'YYYY-MM-DD'), 'none')`,
-          order: sql`${tasks.dueDate}`,
-        };
-      case "assignee":
-        return {
-          key: sql<string>`COALESCE(${taskAssignees.userId}::text, 'unassigned')`,
-          order: sql`${taskAssignees.userId}`,
-        };
-      case "label":
-        return {
-          key: sql<string>`COALESCE(${taskLabels.labelId}::text, 'none')`,
-          order: sql`${taskLabels.labelId}`,
-        };
+      case "dueDate": {
+        // Fall back to server-side UTC day boundaries if the client didn't send
+        // its own — correct ordering either way, just possibly off by a
+        // timezone for users far from UTC.
+        const today = q.todayStart ? new Date(q.todayStart) : new Date(new Date().setUTCHours(0, 0, 0, 0));
+        const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        const dayAfter = new Date(today.getTime() + 2 * 24 * 60 * 60 * 1000);
+        const nextWeek = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
+        const bucket = sql<string>`CASE
+          WHEN ${tasks.dueDate} IS NULL THEN 'no_due_date'
+          WHEN ${tasks.dueDate} < ${today} THEN 'overdue'
+          WHEN ${tasks.dueDate} < ${tomorrow} THEN 'today'
+          WHEN ${tasks.dueDate} < ${dayAfter} THEN 'tomorrow'
+          WHEN ${tasks.dueDate} < ${nextWeek} THEN 'this_week'
+          ELSE 'later' END`;
+        // Rank so groups render in chronological order, not alphabetical.
+        const rank = sql`CASE
+          WHEN ${tasks.dueDate} IS NULL THEN 5
+          WHEN ${tasks.dueDate} < ${today} THEN 0
+          WHEN ${tasks.dueDate} < ${tomorrow} THEN 1
+          WHEN ${tasks.dueDate} < ${dayAfter} THEN 2
+          WHEN ${tasks.dueDate} < ${nextWeek} THEN 3
+          ELSE 4 END`;
+        return { key: bucket, order: rank };
+      }
+      case "assignee": {
+        // Deterministic "first" assignee — ordered so the same task always
+        // lands in the same group across pages and requests.
+        const first = sql<string>`COALESCE((
+          SELECT ta.user_id::text FROM task_assignees ta
+          WHERE ta.task_id = ${tasks.id} ORDER BY ta.user_id LIMIT 1
+        ), 'unassigned')`;
+        return { key: first, order: first };
+      }
+      case "label": {
+        const first = sql<string>`COALESCE((
+          SELECT tl.label_id::text FROM task_labels tl
+          WHERE tl.task_id = ${tasks.id} ORDER BY tl.label_id LIMIT 1
+        ), 'unlabeled')`;
+        return { key: first, order: first };
+      }
     }
   }
 
@@ -291,7 +324,7 @@ export default async function listRoutes(fastify: FastifyInstance) {
 
       const { sortBy, groupBy, dir, limit, offset } = parseListQuery(q);
       const where = buildTaskFilters(listId, q);
-      const g = groupBy ? groupSelectors(groupBy) : null;
+      const g = groupBy ? groupSelectors(groupBy, q) : null;
 
       // Step 1: resolve the ordered window of (taskId, groupKey). Kept narrow so
       // the join-induced duplication for assignee/label grouping stays cheap.
@@ -300,14 +333,16 @@ export default async function listRoutes(fastify: FastifyInstance) {
         ? sql`${g.order} ASC NULLS LAST, ${sortSql} ${dir} NULLS LAST, ${tasks.id} ASC`
         : sql`${sortSql} ${dir} NULLS LAST, ${tasks.id} ASC`;
 
+      // No joins: every group key is a scalar expression over the task row, so
+      // one task yields exactly one row and pagination stays honest.
       const selection = { id: tasks.id, groupKey: g ? g.key : sql<string>`''` };
-      let rowsQuery = db.select(selection).from(tasks).$dynamic();
-      if (groupBy === "assignee") {
-        rowsQuery = rowsQuery.leftJoin(taskAssignees, eq(taskAssignees.taskId, tasks.id));
-      } else if (groupBy === "label") {
-        rowsQuery = rowsQuery.leftJoin(taskLabels, eq(taskLabels.taskId, tasks.id));
-      }
-      const windowRows = await rowsQuery.where(where).orderBy(orderBy).limit(limit).offset(offset);
+      const windowRows = await db
+        .select(selection)
+        .from(tasks)
+        .where(where)
+        .orderBy(orderBy)
+        .limit(limit)
+        .offset(offset);
 
       // Step 2: hydrate the full task records for just this window.
       const ids = [...new Set(windowRows.map(r => r.id))];
@@ -330,14 +365,10 @@ export default async function listRoutes(fastify: FastifyInstance) {
         })
         .filter(Boolean);
 
-      // Total matching ROWS (post-expansion when grouping) drives hasMore.
-      let countQuery = db.select({ count: sql<number>`count(*)::int` }).from(tasks).$dynamic();
-      if (groupBy === "assignee") {
-        countQuery = countQuery.leftJoin(taskAssignees, eq(taskAssignees.taskId, tasks.id));
-      } else if (groupBy === "label") {
-        countQuery = countQuery.leftJoin(taskLabels, eq(taskLabels.taskId, tasks.id));
-      }
-      const [totalResult] = await countQuery.where(where);
+      const [totalResult] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(tasks)
+        .where(where);
       const total = totalResult?.count ?? 0;
 
       return {
@@ -371,19 +402,15 @@ export default async function listRoutes(fastify: FastifyInstance) {
       if (!groupBy) return { groups: [] };
 
       const where = buildTaskFilters(listId, q);
-      const g = groupSelectors(groupBy);
+      const g = groupSelectors(groupBy, q);
 
-      let query = db
-        .select({ key: g.key, count: sql<number>`count(*)::int`, sortKey: sql<string>`MIN(${g.order}::text)` })
+      const groups = await db
+        .select({ key: g.key, count: sql<number>`count(*)::int` })
         .from(tasks)
-        .$dynamic();
-      if (groupBy === "assignee") {
-        query = query.leftJoin(taskAssignees, eq(taskAssignees.taskId, tasks.id));
-      } else if (groupBy === "label") {
-        query = query.leftJoin(taskLabels, eq(taskLabels.taskId, tasks.id));
-      }
+        .where(where)
+        .groupBy(g.key)
+        .orderBy(sql`MIN(${g.order}) ASC NULLS LAST`);
 
-      const groups = await query.where(where).groupBy(g.key).orderBy(sql`MIN(${g.order}) ASC NULLS LAST`);
       return { groupBy, groups };
     } catch (error) {
       console.error("Error fetching task groups:", error);
