@@ -1,13 +1,85 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, schema } from "../../db/index.js";
-import { eq, and, asc, notInArray, sql } from "drizzle-orm";
+import { eq, and, asc, notInArray, sql, inArray, isNull, gte, lte, exists } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { broadcastToWorkspace } from "../../plugins/sse.js";
 import { syncJunctionForListChange } from "../../lib/sprint-list.js";
 
-const { lists, spaces, tasks, taskActivities, workspaceMembers } = schema;
+const { lists, spaces, tasks, taskActivities, workspaceMembers, taskAssignees, taskLabels } = schema;
+
+// ── Server-side list querying (sort / filter / group / paginate) ─────────────
+// Shared by GET /lists/:id/tasks/paged and GET /lists/:id/task-groups so the
+// rows and the group counts can never disagree about what matches.
+
+const CLOSED_STATUSES = ["done", "closed", "complete"];
+
+// Priority is a text column, so alphabetical ordering would give
+// high < low < medium < urgent. Rank it explicitly instead.
+const priorityRank = sql<number>`CASE ${tasks.priority}
+  WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3
+  ELSE 4 END`;
+
+type SortBy = "order" | "dueDate" | "priority" | "name" | "createdAt" | "updatedAt";
+type GroupBy = "status" | "priority" | "assignee" | "dueDate" | "label";
+
+const SORT_EXPR: Record<SortBy, ReturnType<typeof sql>> = {
+  order: sql`${tasks.order}`,
+  dueDate: sql`${tasks.dueDate}`,
+  priority: priorityRank,
+  name: sql`LOWER(${tasks.title})`,
+  createdAt: sql`${tasks.createdAt}`,
+  updatedAt: sql`${tasks.updatedAt}`,
+};
+
+function parseCsv(v?: string): string[] {
+  return (v || "").split(",").map(s => s.trim()).filter(Boolean);
+}
+
+/** Build the WHERE conditions shared by the rows query and the counts query. */
+function buildTaskFilters(listId: string, q: Record<string, string | undefined>) {
+  const conds = [eq(tasks.listId, listId)];
+
+  if (q.includeClosed !== "true") conds.push(notInArray(tasks.status, CLOSED_STATUSES));
+  // Root-level rows only; subtasks are loaded on demand under their parent.
+  if (q.rootsOnly === "true") conds.push(isNull(tasks.parentTaskId));
+  if (q.parentId) conds.push(eq(tasks.parentTaskId, q.parentId));
+
+  const statuses = parseCsv(q.status);
+  if (statuses.length) conds.push(inArray(tasks.status, statuses));
+
+  const priorities = parseCsv(q.priority);
+  if (priorities.length) conds.push(inArray(tasks.priority, priorities));
+
+  if (q.dueFrom) conds.push(gte(tasks.dueDate, new Date(q.dueFrom)));
+  if (q.dueTo) conds.push(lte(tasks.dueDate, new Date(q.dueTo)));
+
+  // Many-to-many filters via EXISTS — avoids the row multiplication a join
+  // would cause when a task has several assignees/labels.
+  const assigneeIds = parseCsv(q.assigneeIds);
+  if (assigneeIds.length) {
+    conds.push(
+      exists(
+        db.select({ x: sql`1` }).from(taskAssignees).where(
+          and(eq(taskAssignees.taskId, tasks.id), inArray(taskAssignees.userId, assigneeIds))
+        )
+      )
+    );
+  }
+  const labelIds = parseCsv(q.labels);
+  if (labelIds.length) {
+    conds.push(
+      exists(
+        db.select({ x: sql`1` }).from(taskLabels).where(
+          and(eq(taskLabels.taskId, tasks.id), inArray(taskLabels.labelId, labelIds))
+        )
+      )
+    );
+  }
+
+  return and(...conds);
+}
 
 async function checkListAccess(listId: string, userId: string) {
   const list = await db.query.lists.findFirst({ where: eq(lists.id, listId), with: { space: true } });
@@ -158,6 +230,163 @@ export default async function listRoutes(fastify: FastifyInstance) {
       };
     } catch (error) {
       console.error("Error fetching tasks:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // Group key + how that group is ordered, for the grouped "ordered stream".
+  // assignee/label live in junction tables, so grouping by them LEFT JOINs and
+  // a task with N assignees legitimately appears once per group.
+  function groupSelectors(groupBy: GroupBy) {
+    switch (groupBy) {
+      case "status":
+        return { key: sql<string>`COALESCE(${tasks.status}, 'none')`, order: sql`${tasks.status}` };
+      case "priority":
+        return { key: sql<string>`COALESCE(${tasks.priority}, 'none')`, order: priorityRank };
+      case "dueDate":
+        return {
+          key: sql<string>`COALESCE(TO_CHAR(${tasks.dueDate}, 'YYYY-MM-DD'), 'none')`,
+          order: sql`${tasks.dueDate}`,
+        };
+      case "assignee":
+        return {
+          key: sql<string>`COALESCE(${taskAssignees.userId}::text, 'unassigned')`,
+          order: sql`${taskAssignees.userId}`,
+        };
+      case "label":
+        return {
+          key: sql<string>`COALESCE(${taskLabels.labelId}::text, 'none')`,
+          order: sql`${taskLabels.labelId}`,
+        };
+    }
+  }
+
+  function parseListQuery(q: Record<string, string | undefined>) {
+    const sortBy: SortBy = (q.sortBy && q.sortBy in SORT_EXPR ? q.sortBy : "order") as SortBy;
+    const groupBy: GroupBy | null = (["status", "priority", "assignee", "dueDate", "label"] as const)
+      .includes(q.groupBy as GroupBy) ? (q.groupBy as GroupBy) : null;
+    return {
+      sortBy,
+      groupBy,
+      dir: q.sortOrder === "desc" ? sql`DESC` : sql`ASC`,
+      limit: Math.min(Math.max(parseInt(q.limit || "100", 10) || 100, 1), 500),
+      offset: Math.max(parseInt(q.offset || "0", 10) || 0, 0),
+    };
+  }
+
+  // GET /lists/:id/tasks/paged
+  // Server-side sort + filter + group + pagination over ROOT tasks. Returns one
+  // ordered stream; when grouping, each row carries its groupKey so the client
+  // just starts a new header whenever the key changes. Subtasks are fetched
+  // separately via ?parentId=.
+  fastify.get("/lists/:id/tasks/paged", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: listId } = request.params as { id: string };
+    const q = request.query as Record<string, string | undefined>;
+
+    try {
+      const access = await checkListAccess(listId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "List not found" });
+
+      const { sortBy, groupBy, dir, limit, offset } = parseListQuery(q);
+      const where = buildTaskFilters(listId, q);
+      const g = groupBy ? groupSelectors(groupBy) : null;
+
+      // Step 1: resolve the ordered window of (taskId, groupKey). Kept narrow so
+      // the join-induced duplication for assignee/label grouping stays cheap.
+      const sortSql = SORT_EXPR[sortBy];
+      const orderBy = g
+        ? sql`${g.order} ASC NULLS LAST, ${sortSql} ${dir} NULLS LAST, ${tasks.id} ASC`
+        : sql`${sortSql} ${dir} NULLS LAST, ${tasks.id} ASC`;
+
+      const selection = { id: tasks.id, groupKey: g ? g.key : sql<string>`''` };
+      let rowsQuery = db.select(selection).from(tasks).$dynamic();
+      if (groupBy === "assignee") {
+        rowsQuery = rowsQuery.leftJoin(taskAssignees, eq(taskAssignees.taskId, tasks.id));
+      } else if (groupBy === "label") {
+        rowsQuery = rowsQuery.leftJoin(taskLabels, eq(taskLabels.taskId, tasks.id));
+      }
+      const windowRows = await rowsQuery.where(where).orderBy(orderBy).limit(limit).offset(offset);
+
+      // Step 2: hydrate the full task records for just this window.
+      const ids = [...new Set(windowRows.map(r => r.id))];
+      const full = ids.length
+        ? await db.query.tasks.findMany({
+            where: inArray(tasks.id, ids),
+            with: {
+              assignees: { with: { user: { columns: { id: true, name: true, email: true, avatarUrl: true } } } },
+              creator: { columns: { id: true, name: true, email: true, avatarUrl: true } },
+            },
+          })
+        : [];
+      const byId = new Map(full.map(t => [t.id, t]));
+      // Re-apply the SQL ordering (findMany returns arbitrary order) and attach
+      // groupKey, keeping the per-group duplicates the join produced.
+      const orderedTasks = windowRows
+        .map(r => {
+          const t = byId.get(r.id);
+          return t ? { ...t, groupKey: r.groupKey } : null;
+        })
+        .filter(Boolean);
+
+      // Total matching ROWS (post-expansion when grouping) drives hasMore.
+      let countQuery = db.select({ count: sql<number>`count(*)::int` }).from(tasks).$dynamic();
+      if (groupBy === "assignee") {
+        countQuery = countQuery.leftJoin(taskAssignees, eq(taskAssignees.taskId, tasks.id));
+      } else if (groupBy === "label") {
+        countQuery = countQuery.leftJoin(taskLabels, eq(taskLabels.taskId, tasks.id));
+      }
+      const [totalResult] = await countQuery.where(where);
+      const total = totalResult?.count ?? 0;
+
+      return {
+        tasks: orderedTasks,
+        total,
+        limit,
+        offset,
+        hasMore: offset + windowRows.length < total,
+      };
+    } catch (error) {
+      console.error("Error fetching paged tasks:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // GET /lists/:id/task-groups
+  // Group buckets + TRUE totals for the current filters, so headers show the
+  // real count even though only a window of rows is loaded. Uses exactly the
+  // same filter builder as /tasks/paged so counts and rows always agree.
+  fastify.get("/lists/:id/task-groups", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: listId } = request.params as { id: string };
+    const q = request.query as Record<string, string | undefined>;
+
+    try {
+      const access = await checkListAccess(listId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "List not found" });
+
+      const { groupBy } = parseListQuery(q);
+      if (!groupBy) return { groups: [] };
+
+      const where = buildTaskFilters(listId, q);
+      const g = groupSelectors(groupBy);
+
+      let query = db
+        .select({ key: g.key, count: sql<number>`count(*)::int`, sortKey: sql<string>`MIN(${g.order}::text)` })
+        .from(tasks)
+        .$dynamic();
+      if (groupBy === "assignee") {
+        query = query.leftJoin(taskAssignees, eq(taskAssignees.taskId, tasks.id));
+      } else if (groupBy === "label") {
+        query = query.leftJoin(taskLabels, eq(taskLabels.taskId, tasks.id));
+      }
+
+      const groups = await query.where(where).groupBy(g.key).orderBy(sql`MIN(${g.order}) ASC NULLS LAST`);
+      return { groupBy, groups };
+    } catch (error) {
+      console.error("Error fetching task groups:", error);
       return reply.status(500).send({ error: "Internal server error" });
     }
   });
