@@ -4,45 +4,37 @@ import { createNotification } from "./notifications.js";
 
 const { reminders } = schema;
 
-export async function checkAndSendReminders(): Promise<number> {
-  const now = new Date();
-  const pendingReminders = await db.query.reminders.findMany({
-    where: and(eq(reminders.sent, false), lte(reminders.remindAt, now)),
+/**
+ * Send the in-app notification for one (already claimed) task reminder.
+ * Claiming/dedup lives in the scheduler (runTaskReminders), which both the
+ * background tick and POST /reminders/check go through.
+ */
+export async function notifyTaskReminder(reminderId: string): Promise<void> {
+  const reminder = await db.query.reminders.findFirst({
+    where: eq(reminders.id, reminderId),
     with: {
       task: { with: { list: { with: { space: true } } } },
       user: { columns: { id: true, name: true, email: true } },
     },
   });
+  if (!reminder) return;
 
-  if (pendingReminders.length === 0) return 0;
+  const taskTitle = reminder.task?.title || "Untitled Task";
+  const dueDateStr = reminder.task?.dueDate
+    ? new Date(reminder.task.dueDate).toLocaleDateString()
+    : "No due date";
 
-  let sentCount = 0;
-  for (const reminder of pendingReminders) {
-    try {
-      const taskTitle = reminder.task?.title || "Untitled Task";
-      const dueDateStr = reminder.task?.dueDate
-        ? new Date(reminder.task.dueDate).toLocaleDateString()
-        : "No due date";
-
-      await createNotification({
-        userId: reminder.userId,
-        type: "task_due_soon",
-        title: `Reminder: ${taskTitle}`,
-        message: `Task "${taskTitle}" is due on ${dueDateStr}`,
-        entityType: "task",
-        entityId: reminder.taskId,
-        taskTitle,
-        dueDate: reminder.task?.dueDate ? new Date(reminder.task.dueDate) : undefined,
-        workspaceId: reminder.task?.list?.space?.workspaceId,
-      });
-
-      await db.update(reminders).set({ sent: true }).where(eq(reminders.id, reminder.id));
-      sentCount++;
-    } catch (error) {
-      console.error(`Error processing reminder ${reminder.id}:`, error);
-    }
-  }
-  return sentCount;
+  await createNotification({
+    userId: reminder.userId,
+    type: "task_due_soon",
+    title: `Reminder: ${taskTitle}`,
+    message: `Task "${taskTitle}" is due on ${dueDateStr}`,
+    entityType: "task",
+    entityId: reminder.taskId,
+    taskTitle,
+    dueDate: reminder.task?.dueDate ? new Date(reminder.task.dueDate) : undefined,
+    workspaceId: reminder.task?.list?.space?.workspaceId,
+  });
 }
 
 export async function autoCreateDueDateReminder(taskId: string, userId: string, dueDate: Date): Promise<void> {

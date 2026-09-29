@@ -39,6 +39,21 @@ export const config = {
   // Cron
   cronApiKey: process.env.CRON_API_KEY || "",
 
+  // Public origin of THIS API (used to build OAuth redirect URIs that Discord
+  // must match exactly), e.g. https://api-taskflow.anuragtech.com
+  publicApiUrl: (process.env.PUBLIC_API_URL || "http://localhost:9001").replace(/\/$/, ""),
+
+  // Discord integration. The feature stays off (routes answer 503, no command
+  // registration) unless all four are set — see isDiscordConfigured().
+  discord: {
+    applicationId: process.env.DISCORD_APPLICATION_ID || "",
+    publicKey: process.env.DISCORD_PUBLIC_KEY || "",
+    botToken: process.env.DISCORD_BOT_TOKEN || "",
+    clientSecret: process.env.DISCORD_CLIENT_SECRET || "",
+    // Overridable only so tests can point at a local mock of the Discord API.
+    apiBase: process.env.DISCORD_API_BASE || "https://discord.com/api/v10",
+  },
+
   // Internal service-to-service auth
   internalApiSecret: (() => {
     const secret = process.env.INTERNAL_API_SECRET;

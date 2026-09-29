@@ -1,5 +1,5 @@
 import { FastifyInstance } from "fastify";
-import { checkAndSendReminders } from "../../lib/reminders.js";
+import { runTaskReminders } from "../../lib/scheduler.js";
 import { config } from "../../config.js";
 
 export default async function reminderCheckRoutes(fastify: FastifyInstance) {
@@ -11,7 +11,7 @@ export default async function reminderCheckRoutes(fastify: FastifyInstance) {
       return reply.status(401).send({ error: "Unauthorized" });
     }
     try {
-      const sentCount = await checkAndSendReminders();
+      const { sent: sentCount } = await runTaskReminders();
       return {
         success: true, remindersSent: sentCount,
         message: sentCount === 0 ? "No pending reminders to send" : `Sent ${sentCount} reminder${sentCount === 1 ? "" : "s"}`,
@@ -30,7 +30,7 @@ export default async function reminderCheckRoutes(fastify: FastifyInstance) {
       return reply.status(401).send({ error: "Unauthorized" });
     }
     try {
-      const sentCount = await checkAndSendReminders();
+      const { sent: sentCount } = await runTaskReminders();
       return {
         success: true, remindersSent: sentCount,
         message: sentCount === 0 ? "No pending reminders to send" : `Sent ${sentCount} reminder${sentCount === 1 ? "" : "s"}`,

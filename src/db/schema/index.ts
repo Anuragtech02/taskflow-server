@@ -1151,3 +1151,73 @@ export type DocumentComment = typeof documentComments.$inferSelect;
 export type NewDocumentComment = typeof documentComments.$inferInsert;
 export type DocumentVersion = typeof documentVersions.$inferSelect;
 export type NewDocumentVersion = typeof documentVersions.$inferInsert;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DISCORD INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+// Time columns here are timestamptz so due-time comparisons never depend on the
+// server process's timezone.
+
+/** A TaskFlow user's linked Discord identity (via Discord OAuth "identify"). */
+export const userDiscordAccounts = pgTable("user_discord_accounts", {
+  userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  discordUserId: varchar("discord_user_id", { length: 32 }).notNull().unique(),
+  discordUsername: varchar("discord_username", { length: 100 }),
+  linkedAt: timestamp("linked_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/** The Discord server (guild) a workspace installed the bot into. One-to-one. */
+export const workspaceDiscordGuilds = pgTable("workspace_discord_guilds", {
+  workspaceId: uuid("workspace_id").primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),
+  guildId: varchar("guild_id", { length: 32 }).notNull().unique(),
+  guildName: varchar("guild_name", { length: 100 }),
+  // IANA zone used for "due today / overdue" in slash commands (Discord
+  // doesn't tell us the invoker's zone). Defaults from the installer's browser.
+  timezone: varchar("timezone", { length: 64 }).notNull().default("UTC"),
+  installedBy: uuid("installed_by").references(() => users.id, { onDelete: "set null" }),
+  installedAt: timestamp("installed_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/** A recurring (or one-time) message the bot posts to a channel, with mentions. */
+export const discordReminders = pgTable(
+  "discord_reminders",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 120 }).notNull(),
+    channelId: varchar("channel_id", { length: 32 }).notNull(),
+    message: text("message").notNull(),
+    // Optional task the reminder is about; rendered as a card with a link.
+    taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    // TaskFlow user ids; resolved to Discord mentions at send time, so a member
+    // who links their account later gets tagged without editing the reminder.
+    mentionUserIds: jsonb("mention_user_ids").$type<string[]>().notNull().default([]),
+    mentionRoleIds: jsonb("mention_role_ids").$type<string[]>().notNull().default([]),
+    mentionHere: boolean("mention_here").notNull().default(false),
+    // See src/lib/discord/schedule.ts for the shape.
+    schedule: jsonb("schedule").$type<import("../../lib/discord/schedule.js").Schedule>().notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    // null once a one-time reminder has fired.
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    lastStatus: varchar("last_status", { length: 20 }), // sent | skipped | failed
+    lastError: text("last_error"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // The scheduler's hot query: enabled AND next_run_at <= now.
+    index("discord_reminders_due_idx").on(t.enabled, t.nextRunAt),
+    index("discord_reminders_workspace_idx").on(t.workspaceId),
+  ]
+);
+
+export const discordRemindersRelations = relations(discordReminders, ({ one }) => ({
+  workspace: one(workspaces, { fields: [discordReminders.workspaceId], references: [workspaces.id] }),
+  task: one(tasks, { fields: [discordReminders.taskId], references: [tasks.id] }),
+}));
+
+export type UserDiscordAccount = typeof userDiscordAccounts.$inferSelect;
+export type WorkspaceDiscordGuild = typeof workspaceDiscordGuilds.$inferSelect;
+export type DiscordReminder = typeof discordReminders.$inferSelect;

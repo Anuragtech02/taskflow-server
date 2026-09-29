@@ -39,6 +39,12 @@ import searchRoutes from "./routes/search/index.js";
 import aiRoutes from "./routes/ai/generate-tasks.js";
 import sseRoutes from "./routes/sse/index.js";
 import reminderCheckRoutes from "./routes/reminders/check.js";
+import discordInteractionRoutes from "./routes/discord/interactions.js";
+import discordConnectRoutes from "./routes/discord/connect.js";
+import discordReminderRoutes from "./routes/discord/reminders.js";
+import { startScheduler } from "./lib/scheduler.js";
+import { discordApi, isDiscordConfigured } from "./lib/discord/api.js";
+import { COMMAND_DEFINITIONS } from "./lib/discord/commands.js";
 import workspaceListRoutes from "./routes/workspaces/lists.js";
 import reportRoutes from "./routes/workspaces/reports.js";
 import documentShareRoutes from "./routes/documents/shares.js";
@@ -110,6 +116,9 @@ await fastify.register(searchRoutes);
 await fastify.register(aiRoutes);
 await fastify.register(sseRoutes);
 await fastify.register(reminderCheckRoutes);
+await fastify.register(discordInteractionRoutes);
+await fastify.register(discordConnectRoutes);
+await fastify.register(discordReminderRoutes);
 await fastify.register(workspaceListRoutes);
 await fastify.register(reportRoutes);
 await fastify.register(documentShareRoutes);
@@ -117,6 +126,8 @@ await fastify.register(documentCommentRoutes);
 await fastify.register(documentVersionRoutes);
 await fastify.register(collabTokenRoutes);
 await fastify.register(sharedTokenRoutes);
+
+let stopScheduler: (() => void) | undefined;
 
 // Graceful shutdown with timeout
 const shutdown = async (signal: string) => {
@@ -126,6 +137,7 @@ const shutdown = async (signal: string) => {
     process.exit(1);
   }, 10_000);
   try {
+    stopScheduler?.();
     await fastify.close();
     clearTimeout(forceExit);
     console.log("Server closed");
@@ -144,6 +156,17 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 try {
   await fastify.listen({ port: config.port, host: config.host });
   console.log(`Fastify server listening on ${config.host}:${config.port}`);
+
+  // Reminders (Discord + in-app task reminders) run in-process.
+  stopScheduler = startScheduler(fastify.log);
+
+  // Keep the slash commands in sync with the code. Bulk overwrite is
+  // idempotent; failure only means commands stay as last registered.
+  if (isDiscordConfigured()) {
+    discordApi.registerCommands(COMMAND_DEFINITIONS)
+      .then(() => fastify.log.info("discord slash commands registered"))
+      .catch((err) => fastify.log.error({ err: String(err) }, "discord command registration failed"));
+  }
 } catch (err) {
   fastify.log.error(err);
   process.exit(1);
