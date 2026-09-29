@@ -305,6 +305,9 @@ describe.skipIf(!DB_URL)("Discord integration (e2e)", () => {
       expect(r.configured).toBe(true);
       expect(r.guild).toMatchObject({ id: GUILD, name: "Main server", timezone: "UTC" });
       expect(r.canManageConnection).toBe(true);
+      expect(r.canManageReminders).toBe(true);
+      const viewer = await (await api(`/workspaces/${W}/discord`, { key: KEY_V })).json();
+      expect(viewer).toMatchObject({ canManageConnection: false, canManageReminders: false });
     });
     it("lists only postable channels and mentionable roles", async () => {
       expect((await (await api(`/workspaces/${W}/discord/channels`)).json()).channels).toEqual([{ id: CHANNEL, name: "general" }]);

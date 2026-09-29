@@ -7,7 +7,7 @@ import { config } from "../../config.js";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { discordApi, DiscordApiError, isDiscordConfigured } from "../../lib/discord/api.js";
 import { createState, readState } from "../../lib/discord/state.js";
-import { membership, MANAGE_CONNECTION_ROLES } from "../../lib/discord/access.js";
+import { membership, MANAGE_CONNECTION_ROLES, MANAGE_REMINDER_ROLES } from "../../lib/discord/access.js";
 
 const { userDiscordAccounts, workspaceDiscordGuilds, discordReminders, workspaceMembers, users } = schema;
 
@@ -72,6 +72,7 @@ export default async function discordConnectRoutes(fastify: FastifyInstance) {
     return {
       configured: isDiscordConfigured(),
       canManageConnection: MANAGE_CONNECTION_ROLES.includes(m.role),
+      canManageReminders: MANAGE_REMINDER_ROLES.includes(m.role),
       guild: guild ? { id: guild.guildId, name: guild.guildName, timezone: guild.timezone, installedAt: guild.installedAt } : null,
     };
   });
