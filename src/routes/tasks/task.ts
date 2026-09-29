@@ -76,8 +76,21 @@ const ALLOWED_TYPES = [
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "text/plain", "text/csv", "application/zip",
+  "text/plain", "text/csv", "text/markdown", "application/zip",
 ];
+
+// Browsers report markdown inconsistently: "text/markdown", "text/x-markdown",
+// "text/plain" (macOS), or an empty string / octet-stream when the OS has no
+// mapping at all. The reported MIME alone can't be trusted for .md files, so
+// recognise them by extension and normalise to text/markdown. Scoped strictly
+// to markdown extensions + those known-benign reports, so this can't become a
+// way to smuggle arbitrary binaries past ALLOWED_TYPES.
+const MARKDOWN_EXT = /\.(md|markdown)$/i;
+const MARKDOWN_REPORTED_TYPES = new Set(["", "text/markdown", "text/x-markdown", "text/plain", "application/octet-stream"]);
+export function resolveUploadMimeType(filename: string, reported: string): string {
+  if (MARKDOWN_EXT.test(filename) && MARKDOWN_REPORTED_TYPES.has(reported)) return "text/markdown";
+  return reported;
+}
 const MAX_SIZE = 50 * 1024 * 1024;
 
 // --- Helpers ---
@@ -750,9 +763,9 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       const data = await request.file();
       if (!data) return reply.status(400).send({ error: "No file provided" });
 
-      const mimeType = data.mimetype;
+      const mimeType = resolveUploadMimeType(data.filename, data.mimetype);
       if (!ALLOWED_TYPES.includes(mimeType)) {
-        return reply.status(400).send({ error: "Invalid file type. Allowed: images, videos, PDF, DOC, DOCX, XLS, XLSX, TXT, CSV, ZIP" });
+        return reply.status(400).send({ error: "Invalid file type. Allowed: images, videos, PDF, DOC, DOCX, XLS, XLSX, TXT, CSV, MD, ZIP" });
       }
 
       const chunks: Buffer[] = [];
