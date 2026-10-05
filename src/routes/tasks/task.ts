@@ -10,6 +10,7 @@ import { assignTaskToSprintAndList, unassignTaskFromSprints, syncJunctionForList
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { config } from "../../config.js";
 import { randomUUID } from "crypto";
+import { descendantIds } from "../../lib/task-subtree.js";
 
 const {
   tasks, lists, spaces, workspaceMembers, taskActivities, taskAssignees,
@@ -33,6 +34,8 @@ const updateTaskSchema = z.object({
   customFields: z.record(z.string(), z.unknown()).optional(),
   parentTaskId: z.string().uuid().nullable().optional(),
   listId: z.string().uuid().optional(),
+  // Also apply this status / list change to every subtask, at any depth.
+  applyToSubtasks: z.boolean().optional(),
 });
 
 const createCommentSchema = z.object({ content: z.string().min(1) });
@@ -69,28 +72,9 @@ const s3Client = new S3Client({
   forcePathStyle: true,
 });
 const BUCKET = config.s3Bucket;
-const ALLOWED_TYPES = [
-  "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml",
-  "video/mp4", "video/webm", "video/quicktime", "video/x-msvideo", "video/x-matroska",
-  "application/pdf", "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "text/plain", "text/csv", "text/markdown", "application/zip",
-];
-
-// Browsers report markdown inconsistently: "text/markdown", "text/x-markdown",
-// "text/plain" (macOS), or an empty string / octet-stream when the OS has no
-// mapping at all. The reported MIME alone can't be trusted for .md files, so
-// recognise them by extension and normalise to text/markdown. Scoped strictly
-// to markdown extensions + those known-benign reports, so this can't become a
-// way to smuggle arbitrary binaries past ALLOWED_TYPES.
-const MARKDOWN_EXT = /\.(md|markdown)$/i;
-const MARKDOWN_REPORTED_TYPES = new Set(["", "text/markdown", "text/x-markdown", "text/plain", "application/octet-stream"]);
-export function resolveUploadMimeType(filename: string, reported: string): string {
-  if (MARKDOWN_EXT.test(filename) && MARKDOWN_REPORTED_TYPES.has(reported)) return "text/markdown";
-  return reported;
-}
+// Any file type may be attached (up to MAX_SIZE). Safety comes from how files
+// are served back — sandboxed, nosniff'd, risky types forced to download (see
+// src/lib/file-serving.ts) — not from an upload allowlist.
 const MAX_SIZE = 50 * 1024 * 1024;
 
 // --- Helpers ---
@@ -164,6 +148,7 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       const body = request.body as Record<string, unknown>;
       const validatedData = updateTaskSchema.parse(body);
       const updateData: Record<string, unknown> = { updatedAt: new Date() };
+      let targetListName: string | undefined;
 
       if (validatedData.title !== undefined) updateData.title = validatedData.title;
       if (validatedData.description !== undefined) updateData.description = validatedData.description;
@@ -187,14 +172,20 @@ export default async function taskRoutes(fastify: FastifyInstance) {
           return reply.status(400).send({ error: "Cannot move task to a list in a different workspace" });
         }
         updateData.listId = validatedData.listId;
+        targetListName = targetList.name;
       }
 
       const oldTask = access.task;
+      const workspaceId = oldTask.list.space.workspaceId;
+      type Cascaded = { id: string; oldStatus: string | null; oldListId: string; statusChanged: boolean; listChanged: boolean };
+      let cascaded: Cascaded[] = [];
       const [updatedTask] = await db.transaction(async (tx) => {
         const [result] = await tx.update(tasks).set(updateData).where(eq(tasks.id, taskId)).returning();
 
         // Log activity for each changed field
-        const changedFields = Object.keys(validatedData) as Array<keyof typeof validatedData>;
+        const changedFields = (Object.keys(validatedData) as Array<keyof typeof validatedData>)
+          // A request option, not a task field — never log it as a change.
+          .filter((f) => f !== "applyToSubtasks");
         for (const field of changedFields) {
           let oldValue = String(oldTask[field as keyof typeof oldTask] ?? "");
           let newValue = String(validatedData[field] ?? "");
@@ -222,6 +213,45 @@ export default async function taskRoutes(fastify: FastifyInstance) {
             await tx.insert(taskActivities).values({ taskId, userId: authResult.userId, action: "updated", field, oldValue, newValue });
           }
         }
+
+        // Cascade a status change or a move to the whole subtree, in the same
+        // transaction so a failure can never leave half a subtree changed.
+        // Moving keeps parent links intact, so the subtree arrives as a unit.
+        const cascadeStatus = validatedData.status !== undefined;
+        const cascadeList = validatedData.listId !== undefined;
+        if (validatedData.applyToSubtasks && (cascadeStatus || cascadeList)) {
+          const ids = await descendantIds(tx, [taskId], workspaceId);
+          if (ids.length > 0) {
+            const before = await tx
+              .select({ id: tasks.id, status: tasks.status, listId: tasks.listId, listName: lists.name })
+              .from(tasks).innerJoin(lists, eq(lists.id, tasks.listId))
+              .where(inArray(tasks.id, ids));
+            // Only touch subtasks that actually differ, so unchanged ones get
+            // no spurious activity or updatedAt bump.
+            const changed = before
+              .map((b) => ({
+                ...b,
+                statusChanged: cascadeStatus && b.status !== validatedData.status,
+                listChanged: cascadeList && b.listId !== validatedData.listId,
+              }))
+              .filter((b) => b.statusChanged || b.listChanged);
+            if (changed.length > 0) {
+              const set: Record<string, unknown> = { updatedAt: new Date() };
+              if (cascadeStatus) set.status = validatedData.status;
+              if (cascadeList) set.listId = validatedData.listId;
+              await tx.update(tasks).set(set).where(inArray(tasks.id, changed.map((c) => c.id)));
+              for (const c of changed) {
+                if (c.statusChanged) {
+                  await tx.insert(taskActivities).values({ taskId: c.id, userId: authResult.userId, action: "updated", field: "status", oldValue: c.status ?? "", newValue: validatedData.status! });
+                }
+                if (c.listChanged) {
+                  await tx.insert(taskActivities).values({ taskId: c.id, userId: authResult.userId, action: "updated", field: "listId", oldValue: c.listName, newValue: targetListName ?? validatedData.listId! });
+                }
+              }
+              cascaded = changed.map((c) => ({ id: c.id, oldStatus: c.status, oldListId: c.listId, statusChanged: c.statusChanged, listChanged: c.listChanged }));
+            }
+          }
+        }
         return [result];
       });
 
@@ -243,6 +273,23 @@ export default async function taskRoutes(fastify: FastifyInstance) {
         } catch (err) { console.error("Error running status_change automations:", err); }
       }
 
+      // Cascaded subtasks get the same side effects as if each had been
+      // changed by hand: sprint junction sync, automations, live updates.
+      for (const c of cascaded) {
+        if (c.listChanged) {
+          try { await syncJunctionForListChange(c.id, validatedData.listId!); }
+          catch (err) { console.error("Error syncing sprint_tasks junction (subtask):", err); }
+        }
+        if (c.statusChanged) {
+          try {
+            await runAutomations("status_change", {
+              taskId: c.id, workspaceId, userId: authResult.userId,
+              oldStatus: c.oldStatus ?? undefined, newStatus: validatedData.status!,
+            });
+          } catch (err) { console.error("Error running status_change automations (subtask):", err); }
+        }
+      }
+
       // Auto-create reminder for due date
       if (validatedData.dueDate !== undefined) {
         const newDueDate = validatedData.dueDate ? new Date(validatedData.dueDate) : null;
@@ -258,7 +305,17 @@ export default async function taskRoutes(fastify: FastifyInstance) {
         type: "task_updated", data: { task: updatedTask, listId: oldTask.listId, spaceId: oldTask.list.space.id, userId: authResult.userId },
       });
 
-      return { task: updatedTask };
+      if (cascaded.length > 0) {
+        const fresh = await db.select().from(tasks).where(inArray(tasks.id, cascaded.map((c) => c.id)));
+        const oldListOf = new Map(cascaded.map((c) => [c.id, c.oldListId]));
+        for (const t of fresh) {
+          fastify.sse.broadcastToWorkspace(workspaceId, {
+            type: "task_updated", data: { task: t, listId: oldListOf.get(t.id), spaceId: oldTask.list.space.id, userId: authResult.userId },
+          });
+        }
+      }
+
+      return { task: updatedTask, subtasksUpdated: cascaded.length };
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
       console.error("Error updating task:", error);
@@ -394,6 +451,35 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       console.error("Error deleting comment:", error);
       return reply.status(500).send({ error: "Internal server error" });
     }
+  });
+
+  // POST /tasks/subtree-count — how many subtasks (every level) sit under these
+  // tasks, so the UI can ask "also apply to all N subtasks?" before a status
+  // change or move. Counts DISTINCT descendants, excluding the selected tasks
+  // themselves (a selected task can also be another selected task's child).
+  const subtreeCountSchema = z.object({ taskIds: z.array(z.string().uuid()).min(1).max(500) });
+  fastify.post("/tasks/subtree-count", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const parsed = subtreeCountSchema.safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ error: "Invalid request body" });
+    const ids = [...new Set(parsed.data.taskIds)];
+
+    const found = await db.query.tasks.findMany({
+      where: inArray(tasks.id, ids),
+      columns: { id: true },
+      with: { list: { columns: {}, with: { space: { columns: { workspaceId: true } } } } },
+    });
+    if (found.length !== ids.length) return reply.status(404).send({ error: "Task not found" });
+    const workspaceIds = [...new Set(found.map((t) => t.list.space.workspaceId))];
+    if (workspaceIds.length !== 1) return reply.status(400).send({ error: "Tasks must belong to one workspace" });
+    const membership = await db.query.workspaceMembers.findFirst({
+      where: and(eq(workspaceMembers.workspaceId, workspaceIds[0]), eq(workspaceMembers.userId, authResult.userId)),
+    });
+    if (!membership) return reply.status(404).send({ error: "Task not found" });
+
+    const descendants = await descendantIds(db, ids, workspaceIds[0]);
+    return { total: descendants.length };
   });
 
   // ==================== BULK ASSIGNEES & LABELS ====================
@@ -763,10 +849,8 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       const data = await request.file();
       if (!data) return reply.status(400).send({ error: "No file provided" });
 
-      const mimeType = resolveUploadMimeType(data.filename, data.mimetype);
-      if (!ALLOWED_TYPES.includes(mimeType)) {
-        return reply.status(400).send({ error: "Invalid file type. Allowed: images, videos, PDF, DOC, DOCX, XLS, XLSX, TXT, CSV, MD, ZIP" });
-      }
+      // Stored as metadata only; serving derives the type from the extension.
+      const mimeType = data.mimetype || "application/octet-stream";
 
       const chunks: Buffer[] = [];
       for await (const chunk of data.file) { chunks.push(chunk); }

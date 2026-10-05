@@ -12,7 +12,7 @@
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio",
     "test": "vitest run",
-    "test:e2e": "npm run build && vitest run test/"
+    "test:e2e": "npm run build && vitest run test/ --no-file-parallelism"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.995.0",

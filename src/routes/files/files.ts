@@ -4,6 +4,9 @@ import { authenticateRequest } from "../../plugins/auth.js";
 import { config } from "../../config.js";
 import { ensureBucket } from "../../lib/init-minio.js";
 import { randomUUID } from "crypto";
+import { eq } from "drizzle-orm";
+import { db, schema } from "../../db/index.js";
+import { contentDisposition, SANDBOX_CSP, servePolicy } from "../../lib/file-serving.js";
 
 const s3Client = new S3Client({
   endpoint: config.s3Endpoint,
@@ -15,11 +18,6 @@ const BUCKET = config.s3Bucket;
 
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml", "image/avif", "image/bmp", "image/tiff"];
 
-const CONTENT_TYPES: Record<string, string> = {
-  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
-  webp: "image/webp", svg: "image/svg+xml", mp4: "video/mp4", webm: "video/webm",
-  mov: "video/quicktime", avi: "video/x-msvideo", mkv: "video/x-matroska", pdf: "application/pdf",
-};
 
 let initialized = false;
 
@@ -81,13 +79,28 @@ export default async function fileRoutes(fastify: FastifyInstance) {
       for await (const chunk of response.Body as AsyncIterable<Uint8Array>) { chunks.push(chunk); }
       const buffer = Buffer.concat(chunks);
 
-      const ext = key.split(".").pop()?.toLowerCase() || "";
-      const contentType = CONTENT_TYPES[ext] || "application/octet-stream";
+      // Attachments keep their original name on download; editor uploads
+      // don't have one, so they fall back to the key's basename.
+      let filename = key.split("/").pop() || "file";
+      if (key.startsWith("attachments/")) {
+        const att = await db.query.taskAttachments.findFirst({
+          where: eq(schema.taskAttachments.fileKey, key),
+          columns: { filename: true },
+        });
+        if (att?.filename) filename = att.filename;
+      }
 
-      return reply
-        .header("Content-Type", contentType)
-        .header("Cache-Control", "public, max-age=86400")
-        .send(buffer);
+      const policy = servePolicy(key);
+      reply
+        .header("Content-Type", policy.contentType)
+        .header("Content-Disposition", contentDisposition(policy.inline, filename))
+        .header("X-Content-Type-Options", "nosniff")
+        // private: these are auth-gated. "public" let a shared cache (the
+        // Cloudflare edge in front of the API) store them and serve them to
+        // requests that never passed the auth check above.
+        .header("Cache-Control", "private, max-age=86400");
+      if (policy.sandbox) reply.header("Content-Security-Policy", SANDBOX_CSP);
+      return reply.send(buffer);
     } catch (error) {
       console.error("File proxy error:", error);
       return reply.status(500).send({ error: "Failed to fetch file" });
