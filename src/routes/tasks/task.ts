@@ -457,7 +457,11 @@ export default async function taskRoutes(fastify: FastifyInstance) {
   // tasks, so the UI can ask "also apply to all N subtasks?" before a status
   // change or move. Counts DISTINCT descendants, excluding the selected tasks
   // themselves (a selected task can also be another selected task's child).
-  const subtreeCountSchema = z.object({ taskIds: z.array(z.string().uuid()).min(1).max(500) });
+  // `sprintId` narrows the count to subtasks in that sprint (sprint moves).
+  const subtreeCountSchema = z.object({
+    taskIds: z.array(z.string().uuid()).min(1).max(500),
+    sprintId: z.string().uuid().optional(),
+  });
   fastify.post("/tasks/subtree-count", async (request, reply) => {
     const authResult = await authenticateRequest(request);
     if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
@@ -478,7 +482,7 @@ export default async function taskRoutes(fastify: FastifyInstance) {
     });
     if (!membership) return reply.status(404).send({ error: "Task not found" });
 
-    const descendants = await descendantIds(db, ids, workspaceIds[0]);
+    const descendants = await descendantIds(db, ids, workspaceIds[0], { inSprintId: parsed.data.sprintId });
     return { total: descendants.length };
   });
 

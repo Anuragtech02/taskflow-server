@@ -12,6 +12,7 @@ import {
   assignTaskToSprintAndList,
   unassignTaskFromSprints,
 } from "../../lib/sprint-list.js";
+import { descendantIds } from "../../lib/task-subtree.js";
 
 const { sprints, workspaceMembers, sprintTasks, tasks, taskActivities, sprintRetroItems, users, lists } = schema;
 
@@ -28,7 +29,19 @@ const moveTaskSchema = z.object({
   fromSprintId: z.string().uuid(),
   toSprintId: z.string().uuid(),
   taskId: z.string().uuid(),
+  /** Also move this task's subtasks (any depth) that are in the source sprint. */
+  applyToSubtasks: z.boolean().optional(),
 });
+
+/** Workspace that owns a task (via its list's space), or null if no such task. */
+async function taskWorkspaceId(taskId: string): Promise<string | null> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(tasks.id, taskId),
+    columns: { id: true },
+    with: { list: { columns: {}, with: { space: { columns: { workspaceId: true } } } } },
+  });
+  return task?.list.space.workspaceId ?? null;
+}
 
 async function checkSprintAccess(sprintId: string, userId: string) {
   const sprint = await db.query.sprints.findFirst({ where: eq(sprints.id, sprintId) });
@@ -238,14 +251,25 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
     const authResult = await authenticateRequest(request);
     if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
     const { id: sprintId, taskId } = request.params as { id: string; taskId: string };
+    const { applyToSubtasks } = request.query as { applyToSubtasks?: string };
     try {
       const access = await checkSprintAccess(sprintId, authResult.userId);
       if (!access) return reply.status(404).send({ error: "Sprint not found" });
+      if ((await taskWorkspaceId(taskId)) !== access.sprint.workspaceId) {
+        return reply.status(404).send({ error: "Task not found" });
+      }
+
+      // Subtasks in this sprint go back with their parent (resolved before the
+      // parent moves; membership is read from the sprint_tasks junction).
+      const subtasks = applyToSubtasks === "true"
+        ? await descendantIds(db, [taskId], access.sprint.workspaceId, { inSprintId: sprintId })
+        : [];
 
       // Model B: drop the junction row AND move the task to the space's
       // Backlog list so it doesn't sit in a (potentially archived) sprint list.
       await unassignTaskFromSprints(taskId);
-      return { success: true };
+      for (const id of subtasks) await unassignTaskFromSprints(id);
+      return { success: true, subtasksUpdated: subtasks.length };
     } catch (error) {
       console.error("Error removing task from sprint:", error);
       return reply.status(500).send({ error: "Internal server error" });
@@ -258,17 +282,26 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
     if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
     try {
       const body = request.body as Record<string, unknown>;
-      const { fromSprintId, toSprintId, taskId } = moveTaskSchema.parse(body);
+      const { fromSprintId, toSprintId, taskId, applyToSubtasks } = moveTaskSchema.parse(body);
 
       const fromAccess = await checkSprintAccess(fromSprintId, authResult.userId);
       if (!fromAccess) return reply.status(403).send({ error: "Access denied" });
       const toAccess = await checkSprintAccess(toSprintId, authResult.userId);
       if (!toAccess) return reply.status(403).send({ error: "Access denied to destination sprint" });
+      const workspaceId = fromAccess.sprint.workspaceId;
+      if (toAccess.sprint.workspaceId !== workspaceId || (await taskWorkspaceId(taskId)) !== workspaceId) {
+        return reply.status(404).send({ error: "Task not found" });
+      }
+
+      const subtasks = applyToSubtasks
+        ? await descendantIds(db, [taskId], workspaceId, { inSprintId: fromSprintId })
+        : [];
 
       // Model B: assignTaskToSprintAndList drops any prior sprint_tasks rows
       // and moves the task's list_id atomically.
       await assignTaskToSprintAndList(taskId, toSprintId);
-      return { success: true };
+      for (const id of subtasks) await assignTaskToSprintAndList(id, toSprintId);
+      return { success: true, subtasksUpdated: subtasks.length };
     } catch (error) {
       if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
       console.error("Error moving task between sprints:", error);

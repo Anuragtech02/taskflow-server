@@ -9,7 +9,7 @@
  *   DATABASE_URL=postgresql://taskflow:taskflow@localhost:55432/taskflow npx drizzle-kit push --force
  *   E2E_DATABASE_URL=postgresql://taskflow:taskflow@localhost:55432/taskflow E2E_S3_ENDPOINT=http://127.0.0.1:59000 npm run test:e2e
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -193,6 +193,91 @@ describe.skipIf(!DB_URL || !S3)("subtree cascade + any-file uploads (e2e)", () =
       const res = await api(`/tasks/${T.P}`, { method: "PATCH", body: { listId: L.foreign, applyToSubtasks: true } });
       expect(res.status).toBe(400);
       expect((await task(T.C1)).list_id).toBe(L.sprint);
+    });
+  });
+
+  describe("sprint page: remove from sprint / move between sprints", () => {
+    // SP: SPar ─ SChild ─ SGrand all in the sprint; SPar ─ SOut lives in a regular list.
+    const S = { Par: randomUUID(), Child: randomUUID(), Grand: randomUUID(), Out: randomUUID() };
+    const SP2 = randomUUID(), L2 = randomUUID(), SPX = randomUUID(), LX = randomUUID();
+    const inSprint = async (id: string) =>
+      (await sql`SELECT sprint_id FROM sprint_tasks WHERE task_id = ${id}`).map((r) => r.sprint_id);
+
+    beforeAll(async () => {
+      const [{ space_id }] = await sql`SELECT space_id FROM lists WHERE id = ${L.one}`;
+      const [{ space_id: foreignSpace }] = await sql`SELECT space_id FROM lists WHERE id = ${L.foreign}`;
+      await sql`INSERT INTO sprints (id, workspace_id, space_id, name, start_date, end_date) VALUES
+        (${SP2}, ${W}, ${space_id}, 'Sprint 17', now(), now() + interval '14 days'),
+        (${SPX}, ${W2}, ${foreignSpace}, 'Their sprint', now(), now() + interval '14 days')`;
+      await sql`INSERT INTO lists (id, space_id, name, kind, sprint_id) VALUES
+        (${L2}, ${space_id}, 'Sprint 17', 'sprint', ${SP2}), (${LX}, ${foreignSpace}, 'Their sprint', 'sprint', ${SPX})`;
+    });
+    beforeEach(async () => {
+      await sql`DELETE FROM tasks WHERE id IN ${sql(Object.values(S))}`;
+      const t = (id: string, list: string, title: string, parent: string | null) =>
+        sql`INSERT INTO tasks (id, list_id, creator_id, title, status, parent_task_id) VALUES (${id}, ${list}, ${U.A}, ${title}, 'todo', ${parent})`;
+      await t(S.Par, L.sprint, "Sprint parent", null);
+      await t(S.Child, L.sprint, "Sprint child", S.Par);
+      await t(S.Grand, L.sprint, "Sprint grandchild", S.Child);
+      await t(S.Out, L.two, "Child outside the sprint", S.Par);
+      await sql`INSERT INTO sprint_tasks (sprint_id, task_id) VALUES (${SP}, ${S.Par}), (${SP}, ${S.Child}), (${SP}, ${S.Grand})`;
+    });
+
+    it("subtree-count with sprintId counts only subtasks in that sprint", async () => {
+      const r = await api("/tasks/subtree-count", { method: "POST", body: { taskIds: [S.Par], sprintId: SP } });
+      expect((await r.json()).total).toBe(2);
+      const all = await api("/tasks/subtree-count", { method: "POST", body: { taskIds: [S.Par] } });
+      expect((await all.json()).total).toBe(3);
+    });
+
+    it("remove without the flag takes out only the parent", async () => {
+      const r = await api(`/sprints/${SP}/tasks/${S.Par}`, { method: "DELETE" });
+      expect(await r.json()).toEqual({ success: true, subtasksUpdated: 0 });
+      expect((await task(S.Par)).list_id).toBe(L.one); // the space's Backlog
+      expect((await task(S.Child)).list_id).toBe(L.sprint);
+      expect(await inSprint(S.Child)).toEqual([SP]);
+    });
+
+    it("remove with the flag sends the in-sprint subtree to Backlog and leaves the outside child alone", async () => {
+      const r = await api(`/sprints/${SP}/tasks/${S.Par}?applyToSubtasks=true`, { method: "DELETE" });
+      expect(await r.json()).toEqual({ success: true, subtasksUpdated: 2 });
+      for (const id of [S.Par, S.Child, S.Grand]) {
+        expect((await task(id)).list_id).toBe(L.one);
+        expect(await inSprint(id)).toEqual([]);
+      }
+      expect((await task(S.Out)).list_id).toBe(L.two);
+      expect((await task(S.Grand)).parent_task_id).toBe(S.Child); // hierarchy intact
+    });
+
+    it("move with the flag carries the in-sprint subtree into the next sprint", async () => {
+      const r = await api("/sprint-tasks", { method: "PUT", body: { fromSprintId: SP, toSprintId: SP2, taskId: S.Par, applyToSubtasks: true } });
+      expect(await r.json()).toEqual({ success: true, subtasksUpdated: 2 });
+      for (const id of [S.Par, S.Child, S.Grand]) {
+        expect((await task(id)).list_id).toBe(L2);
+        expect(await inSprint(id)).toEqual([SP2]);
+      }
+      expect((await task(S.Out)).list_id).toBe(L.two);
+    });
+
+    it("move without the flag moves only the parent", async () => {
+      const r = await api("/sprint-tasks", { method: "PUT", body: { fromSprintId: SP, toSprintId: SP2, taskId: S.Par } });
+      expect((await r.json()).subtasksUpdated).toBe(0);
+      expect((await task(S.Par)).list_id).toBe(L2);
+      expect((await task(S.Child)).list_id).toBe(L.sprint);
+    });
+
+    it("refuses to touch a task from another workspace through your own sprint", async () => {
+      const del = await api(`/sprints/${SP}/tasks/${T.XT}`, { method: "DELETE" });
+      expect(del.status).toBe(404);
+      const put = await api("/sprint-tasks", { method: "PUT", body: { fromSprintId: SP, toSprintId: SP2, taskId: T.XT } });
+      expect(put.status).toBe(404);
+      expect((await task(T.XT)).list_id).toBe(L.foreign);
+    });
+
+    it("refuses to move a task into another workspace's sprint", async () => {
+      const put = await api("/sprint-tasks", { method: "PUT", body: { fromSprintId: SP, toSprintId: SPX, taskId: S.Par } });
+      expect(put.status).toBe(403); // not a member of W2
+      expect((await task(S.Par)).list_id).toBe(L.sprint);
     });
   });
 

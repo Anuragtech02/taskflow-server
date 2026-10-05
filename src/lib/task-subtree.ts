@@ -9,8 +9,17 @@ type Executor = Pick<typeof db, "execute">;
  *
  * UNION (not UNION ALL) de-duplicates as it recurses, so a corrupted
  * parent_task_id cycle terminates instead of looping forever.
+ *
+ * `inSprintId` keeps only descendants that are currently in that sprint —
+ * sprint moves carry along the subtasks that are in the sprint with their
+ * parent, never ones that live in some other list.
  */
-export async function descendantIds(exec: Executor, rootIds: string[], workspaceId: string): Promise<string[]> {
+export async function descendantIds(
+  exec: Executor,
+  rootIds: string[],
+  workspaceId: string,
+  opts: { inSprintId?: string } = {},
+): Promise<string[]> {
   if (rootIds.length === 0) return [];
   const roots = sql.join(rootIds.map((id) => sql`${id}::uuid`), sql`, `);
   const rows = await exec.execute<{ id: string }>(sql`
@@ -25,6 +34,9 @@ export async function descendantIds(exec: Executor, rootIds: string[], workspace
     JOIN spaces sp ON sp.id = l.space_id
     WHERE sp.workspace_id = ${workspaceId}::uuid
       AND s.id NOT IN (${roots})
+      ${opts.inSprintId
+        ? sql`AND EXISTS (SELECT 1 FROM sprint_tasks st WHERE st.task_id = s.id AND st.sprint_id = ${opts.inSprintId}::uuid)`
+        : sql``}
   `);
   return (rows as unknown as { id: string }[]).map((r) => r.id);
 }
