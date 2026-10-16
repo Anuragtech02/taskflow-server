@@ -5,6 +5,7 @@ import { db, schema } from "../../db/index.js";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { discordApi, isDiscordConfigured } from "../../lib/discord/api.js";
 import { deliverReminder } from "../../lib/discord/deliver.js";
+import { friendlyDiscordError } from "../../lib/discord/permissions.js";
 import { describeSchedule, nextOccurrence, scheduleSchema, type Schedule } from "../../lib/discord/schedule.js";
 import { membership, MANAGE_REMINDER_ROLES } from "../../lib/discord/access.js";
 import type { DiscordReminder } from "../../db/schema/index.js";
@@ -69,7 +70,14 @@ async function validateReferences(workspaceId: string, guildId: string, input: z
   if (isDiscordConfigured()) {
     try {
       const channels = await discordApi.listPostableChannels(guildId);
-      if (!channels.some((c) => c.id === input.channelId)) return "That channel isn't a text channel in the connected server";
+      const channel = channels.find((c) => c.id === input.channelId);
+      if (!channel) return "That channel isn't a text channel in the connected server";
+      // A paused reminder can be saved anyway (e.g. pausing one whose channel
+      // just went private); it's checked again when it's switched back on.
+      if (!channel.canPost && input.enabled) {
+        return `The TaskFlow bot can't post in #${channel.name} (missing ${channel.missing.filter((m) => m === "View Channel" || m === "Send Messages").join(" and ")}). `
+          + "If it's a private channel, open its settings in Discord → Permissions → add TaskFlow, then try again.";
+      }
       if (input.mentionRoleIds.length) {
         const roles = await discordApi.listMentionableRoles(guildId);
         if (!input.mentionRoleIds.every((id) => roles.some((r) => r.id === id))) return "Some roles aren't in the connected server";
@@ -164,7 +172,10 @@ export default async function discordReminderRoutes(fastify: FastifyInstance) {
       const { unlinkedUserIds } = await deliverReminder(r, { test: true });
       return { success: true, unlinkedUserIds };
     } catch (error) {
-      return reply.status(502).send({ error: `Discord rejected the message: ${error instanceof Error ? error.message : String(error)}` });
+      request.log.warn({ reminderId: rid, err: String(error) }, "discord test reminder failed");
+      return reply.status(502).send({
+        error: friendlyDiscordError(error) ?? `Discord rejected the message: ${error instanceof Error ? error.message : String(error)}`,
+      });
     }
   });
 }

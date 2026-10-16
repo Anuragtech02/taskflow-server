@@ -1,4 +1,5 @@
 import { config } from "../../config.js";
+import { channelPermissions, describeAccess, type ChannelAccess, type Overwrite } from "./permissions.js";
 
 /** True when every Discord credential is present; the feature is inert otherwise. */
 export function isDiscordConfigured(): boolean {
@@ -45,8 +46,11 @@ async function discordFetch<T>(path: string, init: Init = {}, attempt = 0): Prom
   return parsed as T;
 }
 
-export interface DiscordChannel { id: string; name: string; type: number; position: number; parent_id: string | null }
-export interface DiscordRole { id: string; name: string; color: number; position: number; managed: boolean }
+export interface DiscordChannel {
+  id: string; name: string; type: number; position: number; parent_id: string | null;
+  permission_overwrites?: Overwrite[];
+}
+export interface DiscordRole { id: string; name: string; color: number; position: number; managed: boolean; permissions?: string }
 export interface DiscordUser { id: string; username: string; global_name: string | null }
 export interface DiscordTokenResponse {
   access_token: string;
@@ -58,13 +62,41 @@ export interface DiscordTokenResponse {
 // Text + announcement channels are the ones a bot can post to.
 const POSTABLE_CHANNEL_TYPES = new Set([0, 5]);
 
+// The bot's own user id never changes; look it up once.
+let botUserId: Promise<string> | null = null;
+function getBotUserId(): Promise<string> {
+  botUserId ??= discordFetch<{ id: string }>(`/users/@me`).then((u) => u.id).catch((e) => {
+    botUserId = null;
+    throw e;
+  });
+  return botUserId;
+}
+
 export const discordApi = {
   sendMessage: (channelId: string, message: unknown) =>
     discordFetch<{ id: string }>(`/channels/${channelId}/messages`, { method: "POST", body: message }),
 
-  async listPostableChannels(guildId: string): Promise<DiscordChannel[]> {
-    const all = await discordFetch<DiscordChannel[]>(`/guilds/${guildId}/channels`);
-    return all.filter((c) => POSTABLE_CHANNEL_TYPES.has(c.type)).sort((a, b) => a.position - b.position);
+  /**
+   * Text channels in the server, each with whether the bot can actually post
+   * there. The channel list includes private channels the bot can't see, so
+   * access is computed from the bot's roles and the channel's overwrites.
+   */
+  async listPostableChannels(guildId: string): Promise<(DiscordChannel & ChannelAccess)[]> {
+    const [all, roles, botId] = await Promise.all([
+      discordFetch<DiscordChannel[]>(`/guilds/${guildId}/channels`),
+      discordFetch<DiscordRole[]>(`/guilds/${guildId}/roles`),
+      getBotUserId(),
+    ]);
+    const member = await discordFetch<{ roles: string[] }>(`/guilds/${guildId}/members/${botId}`);
+    return all
+      .filter((c) => POSTABLE_CHANNEL_TYPES.has(c.type))
+      .sort((a, b) => a.position - b.position)
+      .map((c) => ({
+        ...c,
+        ...describeAccess(channelPermissions({
+          guildId, roles, memberId: botId, memberRoleIds: member.roles, overwrites: c.permission_overwrites ?? [],
+        })),
+      }));
   },
 
   async listMentionableRoles(guildId: string): Promise<DiscordRole[]> {

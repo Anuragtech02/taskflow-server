@@ -211,7 +211,7 @@ export default async function discordConnectRoutes(fastify: FastifyInstance) {
     if (!guild) return reply;
     try {
       const channels = await discordApi.listPostableChannels(guild.guildId);
-      return { channels: channels.map((c) => ({ id: c.id, name: c.name })) };
+      return { channels: channels.map((c) => ({ id: c.id, name: c.name, canPost: c.canPost, missing: c.missing })) };
     } catch (error) {
       request.log.error({ err: String(error) }, "discord channels fetch failed");
       return reply.status(502).send({ error: "Couldn't load channels from Discord. Is the bot still in the server?" });

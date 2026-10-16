@@ -28,6 +28,10 @@ const API_A = `http://127.0.0.1:${PORT_A}`;
 const APP_ID = "111111111111111111";
 const GUILD = "222222222222222222", NEW_GUILD = "222222222222222299";
 const CHANNEL = "333333333333333333", VOICE = "333333333333333399";
+// Private channels: HIDDEN hides from @everyone and the bot was never added;
+// TEAM is private too but the bot's role was added to it.
+const HIDDEN = "333333333333333344", TEAM = "333333333333333355";
+const VIEW = 1 << 10, SEND = 1 << 11, EVERYONE_PERMS = String(VIEW | SEND | (1 << 14) | (1 << 17));
 const ROLE = "444444444444444444", MANAGED_ROLE = "444444444444444499";
 const DISCORD_A = "555555555555555555", DISCORD_B = "555555555555555566", STRANGER = "555555555555555577";
 
@@ -58,18 +62,25 @@ function startMock() {
       return json(200, [
         { id: VOICE, name: "voice", type: 2, position: 1, parent_id: null },
         { id: CHANNEL, name: "general", type: 0, position: 0, parent_id: null },
+        { id: HIDDEN, name: "secret", type: 0, position: 2, parent_id: null,
+          permission_overwrites: [{ id: GUILD, type: 0, allow: "0", deny: String(VIEW) }] },
+        { id: TEAM, name: "team", type: 0, position: 3, parent_id: null,
+          permission_overwrites: [{ id: GUILD, type: 0, allow: "0", deny: String(VIEW) }, { id: MANAGED_ROLE, type: 0, allow: String(VIEW | SEND), deny: "0" }] },
       ]);
     if (req.method === "GET" && path.endsWith("/roles"))
       return json(200, [
-        { id: GUILD, name: "@everyone", color: 0, position: 0, managed: false },
-        { id: ROLE, name: "devs", color: 1, position: 2, managed: false },
-        { id: MANAGED_ROLE, name: "TaskFlow", color: 0, position: 3, managed: true },
+        { id: GUILD, name: "@everyone", color: 0, position: 0, managed: false, permissions: EVERYONE_PERMS },
+        { id: ROLE, name: "devs", color: 1, position: 2, managed: false, permissions: "0" },
+        { id: MANAGED_ROLE, name: "TaskFlow", color: 0, position: 3, managed: true, permissions: "0" },
       ]);
+    if (req.method === "GET" && path.endsWith(`/members/${APP_ID}`)) return json(200, { roles: [MANAGED_ROLE] });
+    if (req.method === "POST" && path === `/channels/${HIDDEN}/messages`) return json(403, { message: "Missing Access", code: 50001 });
     if (req.method === "POST" && path.startsWith("/channels/")) return json(200, { id: `msg-${calls.length}` });
     if (req.method === "PUT" && path.includes("/commands")) return json(200, body);
     if (req.method === "POST" && path === "/oauth2/token")
       return json(200, { access_token: "user-token", token_type: "Bearer", scope: "identify", ...(mockTokenGuild && { guild: mockTokenGuild }) });
-    if (req.method === "GET" && path === "/users/@me") return json(200, mockMe);
+    if (req.method === "GET" && path === "/users/@me")
+      return json(200, req.headers.authorization === "Bot bot-token" ? { id: APP_ID, username: "TaskFlow", global_name: null } : mockMe);
     if (req.method === "DELETE") { res.writeHead(204); return res.end(); }
     json(404, { message: "not mocked" });
   });
@@ -309,8 +320,12 @@ describe.skipIf(!DB_URL)("Discord integration (e2e)", () => {
       const viewer = await (await api(`/workspaces/${W}/discord`, { key: KEY_V })).json();
       expect(viewer).toMatchObject({ canManageConnection: false, canManageReminders: false });
     });
-    it("lists only postable channels and mentionable roles", async () => {
-      expect((await (await api(`/workspaces/${W}/discord/channels`)).json()).channels).toEqual([{ id: CHANNEL, name: "general" }]);
+    it("lists text channels with whether the bot can post in each, and mentionable roles", async () => {
+      expect((await (await api(`/workspaces/${W}/discord/channels`)).json()).channels).toEqual([
+        { id: CHANNEL, name: "general", canPost: true, missing: [] },
+        { id: HIDDEN, name: "secret", canPost: false, missing: ["View Channel"] },
+        { id: TEAM, name: "team", canPost: true, missing: [] },
+      ]);
       expect((await (await api(`/workspaces/${W}/discord/roles`)).json()).roles.map((r: any) => r.id)).toEqual([ROLE]);
     });
     it("shows which members have linked Discord", async () => {
@@ -332,6 +347,27 @@ describe.skipIf(!DB_URL)("Discord integration (e2e)", () => {
       const res = await api(`/workspaces/${W}/discord/reminders`, { method: "POST", body: { ...valid, ...patch } });
       expect(res.status).toBe(400);
       expect((await res.json()).error).toContain(msg);
+    });
+    it("rejects a private channel the bot wasn't added to, with how to fix it", async () => {
+      const res = await api(`/workspaces/${W}/discord/reminders`, { method: "POST", body: { ...valid, channelId: HIDDEN } });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/can't post in #secret.*add TaskFlow/);
+    });
+    it("accepts a private channel the bot's role was added to", async () => {
+      const res = await api(`/workspaces/${W}/discord/reminders`, { method: "POST", body: { ...valid, channelId: TEAM } });
+      expect(res.status).toBe(201);
+      await api(`/workspaces/${W}/discord/reminders/${(await res.json()).reminder.id}`, { method: "DELETE" });
+    });
+    it("lets a paused reminder point at it, and explains the failure when testing", async () => {
+      const res = await api(`/workspaces/${W}/discord/reminders`, { method: "POST", body: { ...valid, channelId: HIDDEN, enabled: false } });
+      expect(res.status).toBe(201);
+      const { reminder } = await res.json();
+      const test = await api(`/workspaces/${W}/discord/reminders/${reminder.id}/test`, { method: "POST" });
+      expect(test.status).toBe(502);
+      expect((await test.json()).error).toMatch(/can't see this channel \(it's private\).*add TaskFlow/);
+      const enable = await api(`/workspaces/${W}/discord/reminders/${reminder.id}`, { method: "PATCH", body: { enabled: true } });
+      expect(enable.status).toBe(400); // re-checked when switched back on
+      await api(`/workspaces/${W}/discord/reminders/${reminder.id}`, { method: "DELETE" });
     });
     it("forbids viewers from creating reminders", async () => {
       expect((await api(`/workspaces/${W}/discord/reminders`, { method: "POST", key: KEY_V, body: valid })).status).toBe(403);
@@ -377,6 +413,15 @@ describe.skipIf(!DB_URL)("Discord integration (e2e)", () => {
       const after = await row(r.id);
       expect(after.last_status).toBe("sent");
       expect(new Date(after.next_run_at).getTime()).toBeGreaterThan(Date.now());
+      await sql`DELETE FROM discord_reminders WHERE id = ${r.id}`;
+    });
+
+    it("records a readable error when the channel became private after the reminder was set up", async () => {
+      const r = await create({ name: "Went private", channelId: CHANNEL, message: "PRIVATE check", schedule: { kind: "daily", times: ["09:00"], timezone: "UTC" } });
+      await sql`UPDATE discord_reminders SET channel_id = ${HIDDEN} WHERE id = ${r.id}`;
+      await forceDue(r.id, 5);
+      expect(await waitFor(async () => (await row(r.id)).last_status === "failed")).toBe(true);
+      expect((await row(r.id)).last_error).toMatch(/can't see this channel/);
       await sql`DELETE FROM discord_reminders WHERE id = ${r.id}`;
     });
 

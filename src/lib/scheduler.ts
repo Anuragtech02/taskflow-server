@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, lt, lte } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { isDiscordConfigured } from "./discord/api.js";
 import { deliverReminder } from "./discord/deliver.js";
+import { friendlyDiscordError } from "./discord/permissions.js";
 import { nextOccurrence, scheduleSchema } from "./discord/schedule.js";
 import { notifyTaskReminder } from "./reminders.js";
 import type { DiscordReminder } from "../db/schema/index.js";
@@ -75,7 +76,9 @@ export async function runDiscordReminders(now = new Date(), log?: Log): Promise<
       result.sent++;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      await db.update(discordReminders).set({ lastStatus: "failed", lastError: msg.slice(0, 500), lastRunAt: now }).where(eq(discordReminders.id, r.id));
+      // The dashboard shows lastError, so store the actionable version.
+      const shown = friendlyDiscordError(error) ?? msg;
+      await db.update(discordReminders).set({ lastStatus: "failed", lastError: shown.slice(0, 500), lastRunAt: now }).where(eq(discordReminders.id, r.id));
       log?.error({ reminderId: r.id, err: msg }, "discord reminder delivery failed");
       result.failed++;
     }
