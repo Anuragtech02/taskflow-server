@@ -363,7 +363,7 @@ describe.skipIf(!DB_URL)("Discord integration (e2e)", () => {
       expect(res.status).toBe(201);
       const { reminder } = await res.json();
       const test = await api(`/workspaces/${W}/discord/reminders/${reminder.id}/test`, { method: "POST" });
-      expect(test.status).toBe(502);
+      expect(test.status).toBe(424); // a 4xx so Cloudflare doesn't replace the body
       expect((await test.json()).error).toMatch(/can't see this channel \(it's private\).*add TaskFlow/);
       const enable = await api(`/workspaces/${W}/discord/reminders/${reminder.id}`, { method: "PATCH", body: { enabled: true } });
       expect(enable.status).toBe(400); // re-checked when switched back on

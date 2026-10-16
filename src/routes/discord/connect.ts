@@ -214,7 +214,8 @@ export default async function discordConnectRoutes(fastify: FastifyInstance) {
       return { channels: channels.map((c) => ({ id: c.id, name: c.name, canPost: c.canPost, missing: c.missing })) };
     } catch (error) {
       request.log.error({ err: String(error) }, "discord channels fetch failed");
-      return reply.status(502).send({ error: "Couldn't load channels from Discord. Is the bot still in the server?" });
+      // 424 rather than 502 so Cloudflare passes our message through.
+      return reply.status(424).send({ error: "Couldn't load channels from Discord. Is the bot still in the server?" });
     }
   });
 
@@ -226,7 +227,7 @@ export default async function discordConnectRoutes(fastify: FastifyInstance) {
       return { roles: roles.map((r) => ({ id: r.id, name: r.name, color: r.color })) };
     } catch (error) {
       request.log.error({ err: String(error) }, "discord roles fetch failed");
-      return reply.status(502).send({ error: "Couldn't load roles from Discord. Is the bot still in the server?" });
+      return reply.status(424).send({ error: "Couldn't load roles from Discord. Is the bot still in the server?" });
     }
   });
 

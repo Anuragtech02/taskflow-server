@@ -173,7 +173,9 @@ export default async function discordReminderRoutes(fastify: FastifyInstance) {
       return { success: true, unlinkedUserIds };
     } catch (error) {
       request.log.warn({ reminderId: rid, err: String(error) }, "discord test reminder failed");
-      return reply.status(502).send({
+      // 424, not 502: Cloudflare in front of the API swaps origin 502s for its
+      // own error page, and the explanation never reaches the dashboard.
+      return reply.status(424).send({
         error: friendlyDiscordError(error) ?? `Discord rejected the message: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
