@@ -26,9 +26,23 @@ export default async function notificationRoutes(fastify: FastifyInstance) {
       const offset = Math.max(parseInt(o || "0", 10) || 0, 0);
       const unreadOnly = unread === "true";
 
-      const baseWhere = unreadOnly
-        ? and(eq(notifications.userId, authResult.userId), eq(notifications.read, false))!
-        : eq(notifications.userId, authResult.userId);
+      // Only your own notifications, and never one about a task in a
+      // workspace you are no longer a member of (e.g. after being removed):
+      // its title would still leak what that workspace is working on.
+      const visible = and(
+        eq(notifications.userId, authResult.userId),
+        sql`NOT EXISTS (
+          SELECT 1 FROM tasks t
+          JOIN lists l ON l.id = t.list_id
+          JOIN spaces s ON s.id = l.space_id
+          WHERE ${notifications.entityType} = 'task' AND t.id = ${notifications.entityId}
+            AND NOT EXISTS (
+              SELECT 1 FROM workspace_members wm
+              WHERE wm.workspace_id = s.workspace_id AND wm.user_id = ${authResult.userId}
+            )
+        )`
+      )!;
+      const baseWhere = unreadOnly ? and(visible, eq(notifications.read, false))! : visible;
 
       const userNotifications = await db.select().from(notifications).where(baseWhere)
         .orderBy(desc(notifications.createdAt)).limit(limit).offset(offset);
@@ -53,7 +67,7 @@ export default async function notificationRoutes(fastify: FastifyInstance) {
       );
 
       const unreadCount = await db.select({ count: sql<number>`count(*)` }).from(notifications)
-        .where(and(eq(notifications.userId, authResult.userId), eq(notifications.read, false)));
+        .where(and(visible, eq(notifications.read, false)));
 
       return { notifications: enrichedNotifications, unreadCount: unreadCount[0]?.count || 0 };
     } catch (error) {

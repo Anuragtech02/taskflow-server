@@ -87,6 +87,26 @@ export function sendToUser(workspaceId: string, userId: string, event: SSEEvent)
   }
 }
 
+/**
+ * Close every live stream a user has open on a workspace. Membership is only
+ * checked when a stream opens, so this must be called when someone is removed
+ * from the workspace — otherwise an open tab keeps receiving its events.
+ */
+export function disconnectUser(workspaceId: string, userId: string): number {
+  const connections = workspaceConnections.get(workspaceId);
+  if (!connections) return 0;
+  let closed = 0;
+  for (const [connection, connUserId] of connections) {
+    if (connUserId !== userId) continue;
+    connections.delete(connection);
+    closed++;
+    try { connection.end(); } catch { /* already gone */ }
+    try { connection.destroy(); } catch { /* already gone */ }
+  }
+  if (connections.size === 0) workspaceConnections.delete(workspaceId);
+  return closed;
+}
+
 async function ssePlugin(fastify: FastifyInstance) {
   fastify.decorate("sse", {
     addConnection,
@@ -95,6 +115,7 @@ async function ssePlugin(fastify: FastifyInstance) {
     getActiveUsers,
     broadcastToWorkspace,
     sendToUser,
+    disconnectUser,
   });
 }
 
@@ -107,6 +128,7 @@ declare module "fastify" {
       getActiveUsers: typeof getActiveUsers;
       broadcastToWorkspace: typeof broadcastToWorkspace;
       sendToUser: typeof sendToUser;
+      disconnectUser: typeof disconnectUser;
     };
   }
 }

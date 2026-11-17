@@ -1,7 +1,8 @@
 import { db, schema } from "../db/index.js";
 import { eq, and } from "drizzle-orm";
+import { createNotification, isWorkspaceMember } from "./notifications.js";
 
-const { automations, tasks, taskLabels, labels, notifications, taskAssignees } = schema;
+const { automations, tasks, taskLabels, labels, taskAssignees } = schema;
 
 export type TriggerType = "status_change" | "task_created" | "due_date_approaching" | "assignment";
 export type ActionType = "change_status" | "assign_user" | "add_label" | "send_notification";
@@ -46,7 +47,9 @@ async function executeAutomation(automation: typeof automations.$inferSelect, co
       await db.update(tasks).set({ status: actionConfig.status }).where(eq(tasks.id, context.taskId));
       break;
     case "assign_user":
-      if (actionConfig.userId) {
+      // actionConfig is free-form JSON saved by a workspace admin: the target
+      // must be a member of THIS workspace, or the action is a no-op.
+      if (typeof actionConfig.userId === "string" && (await isWorkspaceMember(context.workspaceId, actionConfig.userId))) {
         await db.insert(taskAssignees).values({ taskId: context.taskId, userId: actionConfig.userId }).onConflictDoNothing();
       }
       break;
@@ -61,14 +64,16 @@ async function executeAutomation(automation: typeof automations.$inferSelect, co
       }
       break;
     case "send_notification":
-      if (actionConfig.userId) {
-        await db.insert(notifications).values({
+      if (typeof actionConfig.userId === "string") {
+        // createNotification drops it unless the user is in this workspace.
+        await createNotification({
           userId: actionConfig.userId,
           type: "automation",
           title: actionConfig.title || "Automation triggered",
           message: actionConfig.message || `Task was updated by automation: ${context.taskId}`,
           entityType: "task",
           entityId: context.taskId,
+          workspaceId: context.workspaceId,
         });
       }
       break;

@@ -5,7 +5,7 @@ import { eq, and, desc, asc, isNull, inArray, sql, count } from "drizzle-orm";
 import { authenticateRequest } from "../../plugins/auth.js";
 import { runAutomations } from "../../lib/automations.js";
 import { autoCreateDueDateReminder } from "../../lib/reminders.js";
-import { createNotification, notifyMentions } from "../../lib/notifications.js";
+import { createNotification, notifyMentions, resolveMentionedMembers } from "../../lib/notifications.js";
 import { assignTaskToSprintAndList, unassignTaskFromSprints, syncJunctionForListChange } from "../../lib/sprint-list.js";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { config } from "../../config.js";
@@ -89,6 +89,26 @@ async function checkTaskAccess(taskId: string, userId: string) {
   });
   if (!membership) return null;
   return { task, membership };
+}
+
+/**
+ * Who a change to each task concerns: its assignees and its creator, minus
+ * the person who made the change. Task events go to the whole workspace so
+ * every open view refreshes, but clients only alert the users listed here.
+ */
+async function concernedUsers(
+  taskList: { id: string; creatorId: string }[],
+  actorId: string
+): Promise<Map<string, string[]>> {
+  const out = new Map<string, Set<string>>(taskList.map((t) => [t.id, new Set([t.creatorId])]));
+  if (taskList.length > 0) {
+    const rows = await db
+      .select({ taskId: taskAssignees.taskId, userId: taskAssignees.userId })
+      .from(taskAssignees)
+      .where(inArray(taskAssignees.taskId, taskList.map((t) => t.id)));
+    for (const r of rows) out.get(r.taskId)?.add(r.userId);
+  }
+  return new Map([...out].map(([id, set]) => [id, [...set].filter((u) => u !== actorId).sort()]));
 }
 
 function calculateRemindAt(preset: string, dueDate: Date | null): Date | null {
@@ -300,17 +320,23 @@ export default async function taskRoutes(fastify: FastifyInstance) {
         }
       }
 
-      // Broadcast SSE event
+      // Broadcast SSE event. Everyone in the workspace gets it (to refresh
+      // open views); `concerns` says who it's worth alerting.
+      const fresh = cascaded.length > 0
+        ? await db.select().from(tasks).where(inArray(tasks.id, cascaded.map((c) => c.id)))
+        : [];
+      const concerns = await concernedUsers([updatedTask, ...fresh], authResult.userId);
       fastify.sse.broadcastToWorkspace(oldTask.list.space.workspaceId, {
-        type: "task_updated", data: { task: updatedTask, listId: oldTask.listId, spaceId: oldTask.list.space.id, userId: authResult.userId },
+        type: "task_updated",
+        data: { task: updatedTask, listId: oldTask.listId, spaceId: oldTask.list.space.id, userId: authResult.userId, concerns: concerns.get(updatedTask.id) ?? [] },
       });
 
-      if (cascaded.length > 0) {
-        const fresh = await db.select().from(tasks).where(inArray(tasks.id, cascaded.map((c) => c.id)));
+      if (fresh.length > 0) {
         const oldListOf = new Map(cascaded.map((c) => [c.id, c.oldListId]));
         for (const t of fresh) {
           fastify.sse.broadcastToWorkspace(workspaceId, {
-            type: "task_updated", data: { task: t, listId: oldListOf.get(t.id), spaceId: oldTask.list.space.id, userId: authResult.userId },
+            type: "task_updated",
+            data: { task: t, listId: oldListOf.get(t.id), spaceId: oldTask.list.space.id, userId: authResult.userId, concerns: concerns.get(t.id) ?? [] },
           });
         }
       }
@@ -391,9 +417,13 @@ export default async function taskRoutes(fastify: FastifyInstance) {
       });
 
       try {
+        const workspaceId = access.task.list.space.workspaceId;
+        // Someone who is mentioned gets the mention, not a second "new
+        // comment" notification for the same comment.
+        const mentioned = await resolveMentionedMembers(validatedData.content, workspaceId);
         const taskAssigneesList = await db.query.taskAssignees.findMany({ where: eq(taskAssignees.taskId, taskId) });
         for (const assignee of taskAssigneesList) {
-          if (assignee.userId !== authResult.userId) {
+          if (assignee.userId !== authResult.userId && !mentioned.includes(assignee.userId)) {
             await createNotification({
               userId: assignee.userId, type: "comment_added",
               title: `New comment on "${access.task.title}"`,
@@ -404,7 +434,7 @@ export default async function taskRoutes(fastify: FastifyInstance) {
           }
         }
         if (access.task.creatorId !== authResult.userId) {
-          const alreadyNotified = taskAssigneesList.some(a => a.userId === access.task.creatorId);
+          const alreadyNotified = taskAssigneesList.some(a => a.userId === access.task.creatorId) || mentioned.includes(access.task.creatorId);
           if (!alreadyNotified) {
             await createNotification({
               userId: access.task.creatorId, type: "comment_added",
@@ -415,7 +445,7 @@ export default async function taskRoutes(fastify: FastifyInstance) {
             });
           }
         }
-        await notifyMentions(validatedData.content, authResult.userId, "task", taskId, access.task.title, access.task.list.space.workspaceId, access.task.list.space.id, access.task.listId);
+        await notifyMentions(validatedData.content, authResult.userId, "task", taskId, access.task.title, workspaceId, access.task.list.space.id, access.task.listId, mentioned);
       } catch (notifError) { console.error("Error sending comment notifications:", notifError); }
 
       return reply.status(201).send({ comment: commentWithUser });

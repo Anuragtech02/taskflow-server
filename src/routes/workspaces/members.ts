@@ -152,6 +152,8 @@ export default async function memberRoutes(fastify: FastifyInstance) {
       if (targetMember.role === "owner") return reply.status(400).send({ error: "Cannot remove the workspace owner" });
 
       await db.delete(workspaceMembers).where(and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)));
+      // They may have the workspace open right now; stop its live updates.
+      fastify.sse.disconnectUser(workspaceId, userId);
       return { success: true };
     } catch (error) {
       console.error("Error removing workspace member:", error);
