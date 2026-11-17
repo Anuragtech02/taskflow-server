@@ -51,15 +51,43 @@ export const scheduleSchema = z.discriminatedUnion("kind", [
 
 export type Schedule = z.infer<typeof scheduleSchema>;
 
+/**
+ * The instant a local wall-clock time refers to in `zone`.
+ *
+ * Two wall-clock times need a rule, and the rule must not depend on when this
+ * code happens to run:
+ *  - A time that happens twice (clocks go back) means its FIRST occurrence.
+ *    Luxon alone resolves it using the zone's offset at the current moment, so
+ *    the same schedule gave the first 01:30 when computed in summer and the
+ *    second when computed in winter — and a late scheduler tick after the
+ *    change could fire a reminder a second time that night.
+ *  - A time that never happens (clocks go forward) moves to the next valid
+ *    instant; Luxon does that consistently, so it is left to Luxon.
+ * Either way a reminder fires exactly once.
+ */
+function resolveLocal(
+  wall: { year: number; month: number; day: number; hour: number; minute: number },
+  zone: string
+): DateTime {
+  const guess = DateTime.fromObject(wall, { zone });
+  if (!guess.isValid) return guess;
+
+  // Every instant that reads as this wall-clock time: try each UTC offset the
+  // zone uses around that day and keep the ones that are really in force then.
+  const wallAsUtc = Date.UTC(wall.year, wall.month - 1, wall.day, wall.hour, wall.minute);
+  const DAY_MS = 86_400_000;
+  const offsets = new Set([guess.zone.offset(wallAsUtc - DAY_MS), guess.zone.offset(wallAsUtc + DAY_MS)]);
+  let earliest: number | null = null;
+  for (const offset of offsets) {
+    const ts = wallAsUtc - offset * 60_000;
+    if (guess.zone.offset(ts) === offset && (earliest === null || ts < earliest)) earliest = ts;
+  }
+  return earliest === null ? guess : DateTime.fromMillis(earliest, { zone });
+}
+
 function atLocal(date: DateTime, time: string, zone: string): DateTime {
   const [hour, minute] = time.split(":").map(Number);
-  // A wall-clock time skipped by a spring-forward DST jump is moved forward by
-  // Luxon to the next valid instant; an ambiguous fall-back time resolves to
-  // the first occurrence. Either way the reminder fires exactly once.
-  return DateTime.fromObject(
-    { year: date.year, month: date.month, day: date.day, hour, minute },
-    { zone }
-  );
+  return resolveLocal({ year: date.year, month: date.month, day: date.day, hour, minute }, zone);
 }
 
 function dayMatches(s: Exclude<Schedule, { kind: "once" }>, day: DateTime): boolean {
@@ -84,8 +112,10 @@ export function nextOccurrence(schedule: Schedule, after: Date): Date | null {
   const from = DateTime.fromJSDate(after);
 
   if (schedule.kind === "once") {
-    const at = DateTime.fromISO(schedule.at, { zone: schedule.timezone });
-    return at > from ? at.toJSDate() : null;
+    // `at` is validated as YYYY-MM-DDTHH:mm, a wall-clock time in the zone.
+    const [year, month, day, hour, minute] = schedule.at.split(/[-T:]/).map(Number);
+    const at = resolveLocal({ year, month, day, hour, minute }, schedule.timezone);
+    return at.isValid && at > from ? at.toJSDate() : null;
   }
 
   // Walk local calendar days in the schedule's zone. The horizon covers the

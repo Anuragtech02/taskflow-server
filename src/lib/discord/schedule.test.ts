@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DateTime } from "luxon";
 import { nextOccurrence, scheduleSchema, type Schedule } from "./schedule.js";
 
@@ -86,6 +86,54 @@ describe("daylight saving (America/New_York, 2027)", () => {
     const n = nextOccurrence(s, utc("2027-11-07T04:00Z"))!; // 00:00 EDT
     expect(n.toISOString()).toBe("2027-11-07T05:30:00.000Z"); // the first 01:30 (EDT)
     expect(local(nextOccurrence(s, n), zone)).toBe("2027-11-08 01:30 Mon"); // not the repeated 01:30 EST
+  });
+
+  // A repeated wall-clock time must resolve the same way no matter WHEN the
+  // server computes it. Luxon alone picks the occurrence from the zone's
+  // offset at the current moment, so the answer used to flip between summer
+  // and winter (and these tests flipped with the calendar).
+  describe.each([
+    ["in summer (EDT)", "2027-07-01T12:00:00Z"],
+    ["in winter (EST)", "2027-12-01T12:00:00Z"],
+    ["just after the clocks went back", "2027-11-07T06:10:00Z"],
+  ])("fall-back, computed %s", (_when, now) => {
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(now)); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("a daily 01:30 fires at the first 01:30 and not again that night", () => {
+      const s = S({ kind: "daily", times: ["01:30"], timezone: zone });
+      const n = nextOccurrence(s, utc("2027-11-07T04:00Z"))!;
+      expect(n.toISOString()).toBe("2027-11-07T05:30:00.000Z");
+      expect(local(nextOccurrence(s, n), zone)).toBe("2027-11-08 01:30 Mon");
+    });
+    it("a one-time reminder at the repeated 01:30 is the first one", () => {
+      const s = S({ kind: "once", at: "2027-11-07T01:30", timezone: zone });
+      expect(nextOccurrence(s, utc("2027-11-01T00:00Z"))?.toISOString()).toBe("2027-11-07T05:30:00.000Z");
+      expect(nextOccurrence(s, utc("2027-11-07T05:30Z"))).toBeNull(); // already fired; the second 01:30 doesn't revive it
+    });
+    it("times outside the repeated hour are unaffected", () => {
+      const s = S({ kind: "daily", times: ["00:30", "02:30", "09:00"], timezone: zone });
+      const a = nextOccurrence(s, utc("2027-11-07T04:00Z"))!;
+      const b = nextOccurrence(s, a)!;
+      const c = nextOccurrence(s, b)!;
+      expect([a, b, c].map((d) => d.toISOString())).toEqual([
+        "2027-11-07T04:30:00.000Z", // 00:30 EDT
+        "2027-11-07T07:30:00.000Z", // 02:30 EST
+        "2027-11-07T14:00:00.000Z", // 09:00 EST
+      ]);
+    });
+    it("a time skipped by spring-forward still moves to the next valid instant", () => {
+      const s = S({ kind: "daily", times: ["02:30"], timezone: zone });
+      expect(nextOccurrence(s, utc("2027-03-14T05:00Z"))?.toISOString()).toBe("2027-03-14T07:30:00.000Z"); // 03:30 EDT
+    });
+  });
+
+  it("handles a zone whose clocks shift by 30 minutes (Australia/Lord_Howe)", () => {
+    // 2027-04-04: 02:00 LHDT (+11:00) falls back to 01:30 LHST (+10:30), so 01:30–02:00 happens twice.
+    const s = S({ kind: "daily", times: ["01:45"], timezone: "Australia/Lord_Howe" });
+    const n = nextOccurrence(s, utc("2027-04-03T13:30Z"))!; // 00:30 LHDT on the 4th
+    expect(n.toISOString()).toBe("2027-04-03T14:45:00.000Z"); // the first 01:45 (+11:00)
+    expect(local(nextOccurrence(s, n), "Australia/Lord_Howe")).toBe("2027-04-05 01:45 Mon");
   });
 });
 
