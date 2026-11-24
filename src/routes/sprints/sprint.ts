@@ -11,6 +11,7 @@ import {
   unarchiveSprintList,
   assignTaskToSprintAndList,
   unassignTaskFromSprints,
+  completeSprintMovingIncomplete,
 } from "../../lib/sprint-list.js";
 import { descendantIds } from "../../lib/task-subtree.js";
 
@@ -32,6 +33,11 @@ const moveTaskSchema = z.object({
   /** Also move this task's subtasks (any depth) that are in the source sprint. */
   applyToSubtasks: z.boolean().optional(),
 });
+
+const completeSprintSchema = z.discriminatedUnion("incompleteTasks", [
+  z.object({ incompleteTasks: z.literal("backlog") }),
+  z.object({ incompleteTasks: z.literal("rollover"), targetSprintId: z.string().uuid() }),
+]);
 
 /** Workspace that owns a task (via its list's space), or null if no such task. */
 async function taskWorkspaceId(taskId: string): Promise<string | null> {
@@ -242,6 +248,43 @@ export default async function sprintRoutes(fastify: FastifyInstance) {
       return { sprint: access.sprint, totalTasks, burndown };
     } catch (error) {
       console.error("Error fetching burndown:", error);
+      return reply.status(500).send({ error: "Internal server error" });
+    }
+  });
+
+  // POST /sprints/:id/complete
+  // Complete a sprint and move ALL its incomplete tasks in one transaction —
+  // to the Backlog, or into another sprint. One request however big the sprint.
+  fastify.post("/sprints/:id/complete", async (request, reply) => {
+    const authResult = await authenticateRequest(request);
+    if (!authResult) return reply.status(401).send({ error: "Unauthorized" });
+    const { id: sprintId } = request.params as { id: string };
+    try {
+      const access = await checkSprintAccess(sprintId, authResult.userId);
+      if (!access) return reply.status(404).send({ error: "Sprint not found" });
+      // Same rule as PATCH status=completed, checked BEFORE anything moves.
+      if (!["owner", "admin"].includes(access.membership.role)) return reply.status(403).send({ error: "Access denied" });
+
+      const body = completeSprintSchema.parse(request.body);
+      if (access.sprint.status === "completed") return reply.status(409).send({ error: "This sprint is already completed" });
+
+      if (body.incompleteTasks === "rollover") {
+        if (body.targetSprintId === sprintId) return reply.status(400).send({ error: "Pick a different sprint to roll over into" });
+        const target = await db.query.sprints.findFirst({ where: eq(sprints.id, body.targetSprintId) });
+        if (!target || target.workspaceId !== access.sprint.workspaceId) return reply.status(404).send({ error: "Target sprint not found" });
+        if (target.status === "completed") return reply.status(400).send({ error: "The target sprint is already completed" });
+      }
+
+      const result = await completeSprintMovingIncomplete(
+        sprintId,
+        body.incompleteTasks === "rollover" ? { kind: "rollover", targetSprintId: body.targetSprintId } : { kind: "backlog" },
+      );
+      // Lost a race with another "Complete" on the same sprint.
+      if (!result) return reply.status(409).send({ error: "This sprint is already completed" });
+      return result;
+    } catch (error) {
+      if (error instanceof z.ZodError) return reply.status(400).send({ error: "Validation error", details: error.issues });
+      console.error("Error completing sprint:", error);
       return reply.status(500).send({ error: "Internal server error" });
     }
   });

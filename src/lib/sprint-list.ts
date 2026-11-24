@@ -226,3 +226,85 @@ export async function archiveSprintList(sprintId: string, archivedAt: Date) {
 export async function unarchiveSprintList(sprintId: string) {
   await db.update(lists).set({ archivedAt: null }).where(eq(lists.sprintId, sprintId));
 }
+
+/** Statuses that count as finished when a sprint is completed. */
+const DONE_STATUSES = ["done", "closed", "complete"];
+
+export type IncompleteDestination = { kind: "backlog" } | { kind: "rollover"; targetSprintId: string };
+
+/**
+ * Complete a sprint in one transaction: every incomplete task in it moves to
+ * the destination, then the sprint is marked completed and its list archived.
+ * Done tasks stay as the sprint's frozen record.
+ *
+ * This replaces the client looping over one request per task (plus a final
+ * PATCH): a 450-task sprint took minutes and could stop half way. Here it is
+ * a handful of set-based statements, and all-or-nothing.
+ *
+ * Per-task semantics match assignTaskToSprintAndList / unassignTaskFromSprints:
+ *  - rollover: the task leaves every sprint, joins the target sprint and moves
+ *    to the target sprint's list.
+ *  - backlog: the task leaves every sprint; if it sits in a sprint-kind list
+ *    it moves to its space's Backlog list, otherwise it stays where it is.
+ *
+ * Returns null if the sprint doesn't exist or is already completed (so a
+ * double submit can't process it twice).
+ */
+export async function completeSprintMovingIncomplete(sprintId: string, dest: IncompleteDestination) {
+  // List creation is idempotent and uses its own connection, so do it up front.
+  const targetList = dest.kind === "rollover" ? await ensureSprintList(dest.targetSprintId) : null;
+
+  return db.transaction(async (tx) => {
+    // Lock the sprint row: two "Complete" clicks can't both get past this.
+    const [sprint] = await tx.select().from(sprints).where(eq(sprints.id, sprintId)).for("update");
+    if (!sprint || sprint.status === "completed") return null;
+
+    const incomplete = await tx
+      .select({ id: tasks.id, listKind: lists.kind, spaceId: lists.spaceId })
+      .from(sprintTasks)
+      .innerJoin(tasks, eq(tasks.id, sprintTasks.taskId))
+      .innerJoin(lists, eq(lists.id, tasks.listId))
+      .where(
+        and(
+          eq(sprintTasks.sprintId, sprintId),
+          sql`(${tasks.status} IS NULL OR ${tasks.status} NOT IN (${sql.join(DONE_STATUSES.map((d) => sql`${d}`), sql`, `)}))`,
+        ),
+      );
+
+    // Chunked so a very large sprint can't exceed the bind-parameter limit.
+    const CHUNK = 1000;
+    const chunks = <T>(arr: T[]) => Array.from({ length: Math.ceil(arr.length / CHUNK) }, (_, i) => arr.slice(i * CHUNK, (i + 1) * CHUNK));
+    const ids = incomplete.map((t) => t.id);
+
+    for (const part of chunks(ids)) {
+      await tx.delete(sprintTasks).where(inArray(sprintTasks.taskId, part));
+    }
+
+    if (dest.kind === "rollover" && targetList) {
+      for (const part of chunks(ids)) {
+        await tx.insert(sprintTasks).values(part.map((taskId) => ({ sprintId: dest.targetSprintId, taskId }))).onConflictDoNothing();
+        await tx.update(tasks).set({ listId: targetList.id }).where(inArray(tasks.id, part));
+      }
+    } else {
+      const bySpace = new Map<string, string[]>();
+      for (const t of incomplete) {
+        if (t.listKind !== "sprint") continue; // not in a sprint list: only the membership is cleared
+        bySpace.set(t.spaceId, [...(bySpace.get(t.spaceId) ?? []), t.id]);
+      }
+      for (const [spaceId, spaceTaskIds] of bySpace) {
+        const backlog = await getOrCreateBacklogList(spaceId);
+        for (const part of chunks(spaceTaskIds)) {
+          await tx.update(tasks).set({ listId: backlog.id }).where(inArray(tasks.id, part));
+        }
+      }
+    }
+
+    const [updated] = await tx.update(sprints).set({ status: "completed" }).where(eq(sprints.id, sprintId)).returning();
+    await tx
+      .update(lists)
+      .set({ archivedAt: updated.endDate })
+      .where(and(eq(lists.sprintId, sprintId), sql`${lists.archivedAt} IS NULL`));
+
+    return { sprint: updated, moved: ids.length, destinationListId: targetList?.id ?? null };
+  });
+}
